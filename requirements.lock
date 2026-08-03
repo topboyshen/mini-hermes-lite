@@ -1,0 +1,2 @@
+pydantic-ai-slim[anthropic,mcp,openai]==2.22.0
+python-telegram-bot[job-queue]==22.8

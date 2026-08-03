@@ -1,0 +1,39 @@
+[Unit]
+Description=Mini Hermes Lite A-share Telegram Agent
+After=network-online.target mini-hermes-pi.service
+Wants=network-online.target mini-hermes-pi.service
+
+[Service]
+Type=simple
+User=mini-hermes
+Group=mini-hermes
+WorkingDirectory=/opt/mini-hermes
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/mini-hermes/app
+EnvironmentFile=/opt/mini-hermes/.env
+ExecStart=/opt/mini-hermes/.venv/bin/python -m mini_hermes
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/mini-hermes/data /var/log/mini-hermes
+MemoryMax=1200M
+TasksMax=96
+
+[Install]
+WantedBy=multi-user.target

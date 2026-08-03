@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "akshare": {
+      "command": "/usr/bin/quanters-akshare-mcp",
+      "args": [],
+      "env": {
+        "AKSHARE_MAX_ROWS": "${AKSHARE_MAX_ROWS:-200}",
+        "QUANTERS_USE_AKTOOLS": "${QUANTERS_USE_AKTOOLS:-false}"
+      }
+    }
+  }
+}

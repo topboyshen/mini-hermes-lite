@@ -1,0 +1,51 @@
+[Unit]
+Description=Mini Hermes Telegram pi Channel Broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi-channel
+Group=pi-channel
+SupplementaryGroups=mini-hermes
+WorkingDirectory=/opt/mini-hermes/workspace
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/mini-hermes/app
+Environment=PI_CODING_AGENT_DIR=/var/lib/mini-hermes-pi/agent
+Environment=PI_CHANNEL_SOCKET=/run/mini-hermes-pi/pi.sock
+Environment=PI_CHANNEL_STATE_DIR=/var/lib/mini-hermes-pi
+Environment=PI_CHANNEL_WORKSPACE=/opt/mini-hermes/workspace
+Environment=PI_CHANNEL_MODEL=ollama-cloud/deepseek-v4-flash
+Environment=PI_CHANNEL_THINKING=off
+Environment=PI_CHANNEL_TIMEOUT_SECONDS=600
+ExecStart=/opt/mini-hermes/.venv/bin/python -m mini_hermes.pi_channel.broker
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+KillMode=mixed
+UMask=0007
+MemoryMax=1400M
+TasksMax=192
+RuntimeDirectory=mini-hermes-pi
+RuntimeDirectoryMode=0750
+StateDirectory=mini-hermes-pi
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/mini-hermes/workspace /var/lib/mini-hermes-pi /run/mini-hermes-pi
+
+[Install]
+WantedBy=multi-user.target
