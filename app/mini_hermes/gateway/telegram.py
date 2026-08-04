@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import re
 import time
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
+from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, Message, Update
+from telegram import Bot, BotCommand, Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -18,15 +20,22 @@ from telegram.ext import (
 
 from mini_hermes.agent import AgentService
 from mini_hermes.config import Settings
-from mini_hermes.us_market import fetch_us_overview
 from mini_hermes.memory import MemoryStore
 from mini_hermes.monitor import system_status
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
+from mini_hermes.reporting import compose_global_report
 from mini_hermes.scheduler import parse_daily_time
+from mini_hermes.us_market import UsIndexQuote, fetch_us_quotes
 
 
 LOGGER = logging.getLogger(__name__)
 STOCK_CODE = re.compile(r"^[0-9]{6}$")
+
+
+class ReportDeliveryError(RuntimeError):
+    def __init__(self, message_ids: Sequence[int]) -> None:
+        super().__init__("Telegram report delivery was only partially completed")
+        self.message_ids = tuple(message_ids)
 
 
 class MiniHermesBot:
@@ -38,7 +47,12 @@ class MiniHermesBot:
             for name in settings.missing_runtime_settings()
             if name != "TELEGRAM_TOKEN"
         ]
-        self.agent = None if model_missing else AgentService(settings, self.memory)
+        self.agent: AgentService | None = None
+        if not model_missing:
+            try:
+                self.agent = AgentService(settings, self.memory)
+            except Exception:  # noqa: BLE001 - keep pi and reports available
+                LOGGER.exception("agent_initialization_failed a_share_commands_disabled=true")
         self.pi_channel = PiChannelClient(
             settings.pi_channel_socket, settings.pi_channel_timeout_seconds
         )
@@ -82,15 +96,19 @@ class MiniHermesBot:
     async def _post_init(self, application: Application) -> None:
         await self.memory.initialize()
         if self.agent is not None:
-            await self.agent.start()
+            try:
+                await self.agent.start()
+            except Exception:  # noqa: BLE001 - keep pi and reports available
+                LOGGER.exception("agent_start_failed a_share_commands_disabled=true")
+                self.agent = None
         await application.bot.set_my_commands(
             [
                 BotCommand("stock", "个股研究：/stock 600875"),
                 BotCommand("market", "市场概览"),
-                BotCommand("report", "立即生成晨报"),
+                BotCommand("report", "立即生成海外市场晨报"),
                 BotCommand("watch", "管理自选股"),
                 BotCommand("style", "设置投资风格"),
-                BotCommand("subscribe", "订阅每日晨报"),
+                BotCommand("subscribe", "订阅海外市场晨报"),
                 BotCommand("status", "节点状态"),
                 BotCommand("new", "新建 pi 会话"),
                 BotCommand("abort", "中止当前 pi 任务"),
@@ -163,7 +181,8 @@ class MiniHermesBot:
         if self.agent is None:
             await self._reply(
                 update,
-                "Telegram 入口已在线，但模型 API Key 尚未配置。请填写服务器 .env 中与 MODEL 对应的 Key 后重启服务。",
+                "A 股研究 Agent 暂不可用，请用 /status 查看状态或检查服务日志。"
+                "普通 pi 对话和海外晨报不受影响。",
             )
             return
         user, chat = update.effective_user, update.effective_chat
@@ -190,6 +209,98 @@ class MiniHermesBot:
             len(response),
         )
         await self._finish_progress(update, progress, response)
+
+    async def _generate_global_report(
+        self, quotes: Sequence[UsIndexQuote] | None = None
+    ) -> str:
+        if quotes is None:
+            quotes = await fetch_us_quotes()
+        report_date = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
+        return compose_global_report(report_date, quotes)
+
+    async def _deliver_report(
+        self,
+        bot: Bot,
+        chat_id: int,
+        report: str,
+        *,
+        progress: Message | None = None,
+    ) -> list[int]:
+        if not report.strip():
+            raise ValueError("Refusing to deliver an empty report")
+        chunks = [report[index : index + 4000] for index in range(0, len(report), 4000)]
+        message_ids: list[int] = []
+        if progress is not None:
+            try:
+                await progress.edit_text(chunks[0])
+                message_ids.append(progress.message_id)
+                chunks = chunks[1:]
+            except Exception:  # noqa: BLE001 - retry as fresh Telegram messages
+                LOGGER.exception("report_progress_edit_failed chat_id=%s", chat_id)
+        for chunk in chunks:
+            try:
+                message = await bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception as exc:  # noqa: BLE001 - retain partial delivery audit
+                raise ReportDeliveryError(message_ids) from exc
+            message_ids.append(message.message_id)
+        return message_ids
+
+    async def _run_report(self, update: Update) -> None:
+        if not await self._authorized(update):
+            return
+        user, chat = update.effective_user, update.effective_chat
+        message = update.effective_message
+        if user is None or chat is None or message is None:
+            return
+        progress = await message.reply_text("⏳ 正在生成海外市场晨报，请稍候…")
+        started = time.monotonic()
+        LOGGER.info("report_generation_started trigger=manual user_id=%s", user.id)
+        try:
+            report = await self._generate_global_report()
+        except asyncio.TimeoutError:
+            LOGGER.warning("report_generation_failed trigger=manual reason=timeout user_id=%s", user.id)
+            await self._finish_progress(update, progress, "报告生成超时，请稍后重试。")
+            return
+        except Exception:  # noqa: BLE001 - keep Telegram handler alive
+            LOGGER.exception("report_generation_failed trigger=manual user_id=%s", user.id)
+            await self._finish_progress(
+                update, progress, "海外市场晨报暂时不可用，请稍后重试。"
+            )
+            return
+        try:
+            message_ids = await self._deliver_report(
+                self.application.bot,
+                chat.id,
+                report,
+                progress=progress,
+            )
+        except ReportDeliveryError as exc:
+            LOGGER.exception(
+                "report_delivery_failed trigger=manual user_id=%s chat_id=%s "
+                "partial_message_ids=%s",
+                user.id,
+                chat.id,
+                exc.message_ids,
+            )
+            await self._reply(update, "晨报投递未完整完成，请稍后重试。")
+            return
+        except Exception:  # noqa: BLE001 - keep Telegram handler alive
+            LOGGER.exception(
+                "report_delivery_failed trigger=manual user_id=%s chat_id=%s",
+                user.id,
+                chat.id,
+            )
+            await self._reply(update, "晨报投递失败，请稍后重试。")
+            return
+        LOGGER.info(
+            "report_delivery_succeeded trigger=manual user_id=%s chat_id=%s "
+            "message_ids=%s chars=%s seconds=%.2f",
+            user.id,
+            chat.id,
+            message_ids,
+            len(report),
+            time.monotonic() - started,
+        )
 
     async def _run_pi(self, update: Update, prompt: str) -> None:
         if not await self._authorized(update):
@@ -244,7 +355,8 @@ class MiniHermesBot:
             return
         await self._reply(
             update,
-            "Mini Hermes Lite 已在线。普通消息由 pi 处理；A 股研究可使用 /stock、/market、/report。",
+            "Mini Hermes Lite 已在线。普通消息由 pi 处理；A 股研究使用 /stock、/market，"
+            "海外晨报使用 /report。",
         )
 
     async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -259,7 +371,7 @@ class MiniHermesBot:
             update,
             "/stock 600875 — 个股研究\n"
             "/market — A 股市场概览\n"
-            "/report — 立即生成晨报\n"
+            "/report — 立即生成海外市场晨报\n"
             "/watch add 600875 — 添加自选\n"
             "/watch remove 600875 — 删除自选\n"
             "/watch list — 查看自选\n"
@@ -282,7 +394,8 @@ class MiniHermesBot:
         await self._reply(
             update,
             "普通消息已经默认由 pi 处理，无需切换模式。pi 可在隔离工作区读写文件、运行命令和调用工具。\n"
-            "使用 /new 开新会话，/abort 中止任务；A 股研究使用 /stock、/market、/report。",
+            "使用 /new 开新会话，/abort 中止任务；A 股研究使用 /stock、/market，"
+            "海外晨报使用 /report。",
         )
 
     async def hermes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,7 +403,8 @@ class MiniHermesBot:
             return
         await self._reply(
             update,
-            "现在是单一通道，无需切换模式。普通消息由 pi 处理；A 股研究使用 /stock、/market、/report。",
+            "现在是单一通道，无需切换模式。普通消息由 pi 处理；A 股研究使用 /stock、/market，"
+            "海外晨报使用 /report。",
         )
 
     async def new_pi_session_command(
@@ -354,7 +468,7 @@ class MiniHermesBot:
         )
 
     async def report_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._run_agent(update, "生成今日 A 股晨报，并重点覆盖我的自选股。")
+        await self._run_report(update)
 
     async def watch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
@@ -397,7 +511,11 @@ class MiniHermesBot:
         user, chat = update.effective_user, update.effective_chat
         assert user is not None and chat is not None
         await self.memory.set_subscription(user.id, chat.id, True)
-        await self._reply(update, f"已订阅每日 {self.settings.daily_report_time} A 股晨报。")
+        await self._reply(
+            update,
+            f"已订阅美股交易日收盘后的 {self.settings.daily_report_time} 海外市场晨报"
+            "（上海时间通常为周二至周六）。",
+        )
 
     async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
@@ -430,32 +548,66 @@ class MiniHermesBot:
             await self._run_pi(update, message.text)
 
     async def daily_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if self.agent is None:
-            LOGGER.warning("daily_report_skipped reason=model_key_missing")
+        now = datetime.now(ZoneInfo(self.settings.timezone))
+        # At 08:30 Asia/Shanghai, US Monday-Friday closes arrive Tuesday-Saturday.
+        if now.weekday() in {0, 6}:
+            LOGGER.info("daily_report_skipped reason=no_recent_us_close date=%s", now.date())
             return
-        for user_id, chat_id in await self.memory.subscriptions():
+        subscriptions = await self.memory.subscriptions()
+        if not subscriptions:
+            LOGGER.info("daily_report_skipped reason=no_subscribers date=%s", now.date())
+            return
+
+        recipients: list[tuple[int, int]] = []
+        for user_id, chat_id in subscriptions:
             if user_id not in self.settings.allowed_user_ids:
+                LOGGER.warning(
+                    "daily_report_skipped reason=user_not_allowed user_id=%s chat_id=%s",
+                    user_id,
+                    chat_id,
+                )
                 continue
+            recipients.append((user_id, chat_id))
+        if not recipients:
+            LOGGER.info("daily_report_skipped reason=no_allowed_recipients date=%s", now.date())
+            return
+
+        LOGGER.info(
+            "report_generation_started trigger=scheduled date=%s recipients=%s",
+            now.date(),
+            len(recipients),
+        )
+        try:
+            report = await self._generate_global_report()
+        except Exception:  # noqa: BLE001 - one failed run must not stop the scheduler
+            LOGGER.exception("report_generation_failed trigger=scheduled date=%s", now.date())
+            return
+
+        for user_id, chat_id in recipients:
             try:
-                us_data = await fetch_us_overview()
-                prompt = "生成今日 A 股晨报，并重点覆盖我的自选股。"
-                if us_data:
-                    prompt = (
-                        "已知美股隔夜收盘数据（新浪财经，已为你拉取，请直接用于「美股隔夜总结」板块，"
-                        "不要再调用工具获取美股）：\n"
-                        + us_data
-                        + "\n\n"
-                        + prompt
-                        + " 晨报需包含「美股隔夜总结」板块，用上面提供的真实数据撰写，"
-                        "并简要点评对 A 股开盘可能的影响。"
-                    )
-                else:
-                    prompt = prompt + " 如能获取到美股数据，简要补充美股隔夜表现。"
-                report = await self.agent.run(user_id, prompt, report=True)
-                for index in range(0, len(report), 4000):
-                    await context.bot.send_message(chat_id=chat_id, text=report[index : index + 4000])
+                message_ids = await self._deliver_report(context.bot, chat_id, report)
+                LOGGER.info(
+                    "report_delivery_succeeded trigger=scheduled user_id=%s chat_id=%s "
+                    "message_ids=%s chars=%s",
+                    user_id,
+                    chat_id,
+                    message_ids,
+                    len(report),
+                )
+            except ReportDeliveryError as exc:
+                LOGGER.exception(
+                    "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s "
+                    "partial_message_ids=%s",
+                    user_id,
+                    chat_id,
+                    exc.message_ids,
+                )
             except Exception:  # noqa: BLE001 - one subscriber must not block others
-                LOGGER.exception("daily_report_failed user_id=%s chat_id=%s", user_id, chat_id)
+                LOGGER.exception(
+                    "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s",
+                    user_id,
+                    chat_id,
+                )
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         LOGGER.exception("telegram_update_failed", exc_info=context.error)

@@ -18,6 +18,5 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(settings.model, "exported-model")
                 self.assertEqual(settings.allowed_user_ids, frozenset({1, 2}))
 
-
 if __name__ == "__main__":
     unittest.main()

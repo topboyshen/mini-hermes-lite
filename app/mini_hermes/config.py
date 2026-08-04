@@ -32,7 +32,6 @@ class Settings:
     telegram_token: str
     allowed_user_ids: frozenset[int]
     model: str
-    report_model: str
     timezone: str
     daily_report_time: str
     agent_timeout_seconds: int
@@ -52,7 +51,6 @@ class Settings:
             telegram_token=os.getenv("TELEGRAM_TOKEN", "").strip(),
             allowed_user_ids=_int_set(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")),
             model=os.getenv("MODEL", "openai:gpt-5-mini").strip(),
-            report_model=os.getenv("REPORT_MODEL", "").strip(),
             timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai").strip(),
             daily_report_time=os.getenv("DAILY_REPORT_TIME", "08:30").strip(),
             agent_timeout_seconds=int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")),
@@ -75,13 +73,13 @@ class Settings:
         missing: list[str] = []
         if not self.telegram_token:
             missing.append("TELEGRAM_TOKEN")
-        provider = self.model.partition(":")[0].lower()
         key_by_provider = {
             "openai": "OPENAI_API_KEY",
             "openai-chat": "OPENAI_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
         }
+        provider = self.model.partition(":")[0].lower()
         key_name = key_by_provider.get(provider)
         if key_name and not os.getenv(key_name, "").strip():
             missing.append(key_name)

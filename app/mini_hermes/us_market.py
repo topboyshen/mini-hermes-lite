@@ -1,14 +1,13 @@
-"""美股三大指数隔夜行情抓取 (新浪财经国际指数接口).
-
-数据源: https://hq.sinajs.cn/list=int_dji,int_nasdaq,int_sp500
-GBK 编码, 需 Referer. 返回格式: 名称,最新价,涨跌额,涨跌幅%
-用于晨报「美股隔夜总结」板块, 把真实数据注入 prompt, 避免模型凭记忆编造.
-"""
+"""Fetch and parse overnight US index quotes from Sina Finance."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
+import re
+from typing import Sequence
 
 import httpx
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,7 +16,6 @@ _SINA_HEADERS = {
     "Referer": "https://finance.sina.com.cn",
     "User-Agent": "Mozilla/5.0 mini-hermes/0.1",
 }
-# 代码 -> 中文名 (接口名是 GBK, 用固定名更稳)
 _INDICES = {
     "int_dji": "道琼斯工业指数",
     "int_nasdaq": "纳斯达克综合指数",
@@ -25,37 +23,71 @@ _INDICES = {
 }
 
 
-async def fetch_us_overview() -> str:
-    """返回美股三大指数文本块, 失败返回空串 (调用方按空降级)."""
+@dataclass(frozen=True, slots=True)
+class UsIndexQuote:
+    code: str
+    name: str
+    price: str
+    change: str
+    percent: str
+
+
+def parse_us_quotes(raw: str) -> tuple[UsIndexQuote, ...]:
+    """Parse quotes while preserving the source number strings exactly."""
+    quotes: list[UsIndexQuote] = []
+    for code, name in _INDICES.items():
+        match = re.search(rf'var\s+hq_str_{re.escape(code)}="([^"]*)"', raw)
+        if match is None or not match.group(1):
+            continue
+        parts = match.group(1).split(",")
+        if len(parts) < 4:
+            continue
+        price, change, percent = parts[1:4]
+        try:
+            float(price)
+            float(change)
+            float(percent)
+        except ValueError:
+            continue
+        quotes.append(
+            UsIndexQuote(
+                code=code,
+                name=name,
+                price=price,
+                change=change,
+                percent=percent,
+            )
+        )
+    return tuple(quotes)
+
+
+async def fetch_us_quotes() -> tuple[UsIndexQuote, ...]:
+    """Return parsed US index quotes; return an empty tuple on fetch failure."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(_SINA_URL, headers=_SINA_HEADERS)
-            raw = resp.content.decode("gbk", errors="replace")
-    except Exception as e:  # noqa: BLE001
-        LOGGER.warning("us_overview_fetch_failed: %s", e)
-        return ""
+            response = await client.get(_SINA_URL, headers=_SINA_HEADERS)
+            response.raise_for_status()
+            raw = response.content.decode("gbk", errors="replace")
+    except Exception as exc:  # noqa: BLE001 - degrade to a clear no-data state
+        LOGGER.warning("us_quotes_fetch_failed error=%s", exc)
+        return ()
 
-    lines: list[str] = []
-    for code, name in _INDICES.items():
-        token = f'var hq_str_{code}="'
-        i = raw.find(token)
-        if i < 0:
-            continue
-        start = i + len(token)
-        end = raw.find('"', start)
-        if end < 0:
-            continue
-        body = raw[start:end]
-        if not body:
-            continue
-        parts = body.split(",")
-        try:
-            if len(parts) >= 4:
-                price, chg, pct = parts[1], parts[2], parts[3]
-                sign = "+" if float(chg) >= 0 else ""
-                lines.append(f"- {name}: {price} 点, 涨跌 {sign}{chg}, {sign}{pct}%")
-            elif len(parts) >= 2:
-                lines.append(f"- {name}: {parts[1]} 点")
-        except (ValueError, IndexError):
-            continue
-    return "\n".join(lines)
+    quotes = parse_us_quotes(raw)
+    if not quotes:
+        LOGGER.warning("us_quotes_parse_empty")
+    return quotes
+
+
+def _signed(value: str) -> str:
+    return value if value.startswith(("+", "-")) or float(value) < 0 else f"+{value}"
+
+
+def render_us_index_block(quotes: Sequence[UsIndexQuote]) -> str:
+    """Render exact source strings without passing them through an LLM."""
+    if not quotes:
+        return "- 美股主要指数数据暂时不可用。"
+    return "\n".join(
+        f"- {quote.name}: {quote.price} 点, 涨跌 {_signed(quote.change)}, "
+        f"{_signed(quote.percent)}%"
+        for quote in quotes
+    )

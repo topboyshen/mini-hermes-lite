@@ -28,10 +28,6 @@ INSTRUCTIONS = """
 6. 个股分析优先覆盖：行情快照、趋势/量价、基本面或催化、主要风险、后续观察点。
 """.strip()
 
-# glm-5.2 是重推理模型, 晨报给足 token 预算避免推理没做完就截断空答
-REPORT_MAX_TOKENS = 4000
-
-
 class AgentService:
     def __init__(self, settings: Settings, memory: MemoryStore) -> None:
         self.settings = settings
@@ -42,12 +38,6 @@ class AgentService:
         toolsets = load_mcp_toolsets(settings.mcp_config)
         self._toolset_count = len(toolsets)
         self._interactive_model = self._build_model(settings.model)
-        # 晨报专用模型 (REPORT_MODEL), 留空则回落到交互模型
-        self._report_model = (
-            self._build_model(settings.report_model)
-            if settings.report_model.strip()
-            else None
-        )
         self._agent: Agent[None, str] = Agent(
             self._interactive_model,
             instructions=INSTRUCTIONS,
@@ -71,12 +61,16 @@ class AgentService:
     async def start(self) -> None:
         if self._started:
             return
-        await self._stack.enter_async_context(self._agent)
+        try:
+            await self._stack.enter_async_context(self._agent)
+        except Exception:
+            await self._stack.aclose()
+            self._stack = AsyncExitStack()
+            raise
         self._started = True
         LOGGER.info(
-            "agent_started model=%s report_model=%s mcp_toolsets=%s",
+            "agent_started model=%s mcp_toolsets=%s",
             self.settings.model,
-            self.settings.report_model or "(same as model)",
             self._toolset_count,
         )
 
@@ -95,27 +89,30 @@ class AgentService:
     def toolset_count(self) -> int:
         return self._toolset_count
 
-    async def run(self, user_id: int, prompt: str, *, report: bool = False) -> str:
+    async def run(self, user_id: int, prompt: str) -> str:
         if not self._started:
             raise RuntimeError("Agent is not started")
-        history = await self.memory.recent_messages(user_id, self.settings.max_history_messages)
+        history = await self.memory.recent_messages(
+            user_id, self.settings.max_history_messages
+        )
         watchlist = await self.memory.list_watch(user_id)
         style = await self.memory.get_style(user_id)
         context_lines = ["用户长期偏好与上下文："]
         context_lines.append(f"投资风格：{style or '未设置'}")
-        context_lines.append(f"自选股：{', '.join(watchlist) if watchlist else '未设置'}")
+        context_lines.append(
+            f"自选股：{', '.join(watchlist) if watchlist else '未设置'}"
+        )
         if history:
-            compact = "\n".join(f"{role}: {content[:800]}" for role, content in history)
+            compact = "\n".join(
+                f"{role}: {content[:800]}" for role, content in history
+            )
             context_lines.append(f"最近对话：\n{compact}")
         context_text = "\n".join(context_lines)
         full_prompt = f"{context_text}\n\n本次请求：{prompt}"
 
-        use_model = self._report_model if (report and self._report_model) else None
-        model_settings = {"max_tokens": REPORT_MAX_TOKENS} if (report and self._report_model) else None
-
         async with self._semaphore:
             result = await asyncio.wait_for(
-                self._agent.run(full_prompt, model=use_model, model_settings=model_settings),
+                self._agent.run(full_prompt),
                 timeout=self.settings.agent_timeout_seconds,
             )
         output = str(result.output).strip()
