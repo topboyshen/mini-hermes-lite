@@ -8,15 +8,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from mini_hermes.config import Settings
+from mini_hermes.overseas_market import fetch_overseas_snapshot
 from mini_hermes.reporting import A_SHARE_TERMS, compose_global_report
-from mini_hermes.us_market import fetch_us_quotes
 
 
 async def generate(env_file: Path) -> str:
     settings = Settings.from_env(env_file)
-    quotes = await fetch_us_quotes()
+    snapshot = await fetch_overseas_snapshot()
     report_date = datetime.now(ZoneInfo(settings.timezone)).date().isoformat()
-    report = compose_global_report(report_date, quotes)
+    report = compose_global_report(report_date, snapshot)
     if any(term.casefold() in report.casefold() for term in A_SHARE_TERMS):
         raise RuntimeError("Prohibited mainland-equity content survived sanitization")
     return report

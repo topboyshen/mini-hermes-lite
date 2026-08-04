@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from mini_hermes.gateway.telegram import MiniHermesBot, ReportDeliveryError
+from mini_hermes.overseas_market import OverseasMarketSnapshot
 from mini_hermes.us_market import UsIndexQuote
 
 
@@ -41,36 +42,62 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             recent_messages=AsyncMock(),
             list_watch=AsyncMock(),
         )
-        quotes = (
-            UsIndexQuote(
-                code="int_dji",
-                name="道琼斯工业指数",
-                price="44563.12",
-                change="10.50",
-                percent="0.02",
+        snapshot = OverseasMarketSnapshot(
+            us_indices=(
+                UsIndexQuote(
+                    code="int_dji",
+                    name="道琼斯工业指数",
+                    price="44563.12",
+                    change="10.50",
+                    percent="0.02",
+                ),
+                UsIndexQuote(
+                    code="int_nasdaq",
+                    name="纳斯达克综合指数",
+                    price="22484.07",
+                    change="99.37",
+                    percent="0.44",
+                ),
+                UsIndexQuote(
+                    code="int_sp500",
+                    name="标普500指数",
+                    price="6329.94",
+                    change="7.18",
+                    percent="0.11",
+                ),
             ),
-            UsIndexQuote(
-                code="int_nasdaq",
-                name="纳斯达克综合指数",
-                price="22484.07",
-                change="99.37",
-                percent="0.44",
-            ),
-            UsIndexQuote(
-                code="int_sp500",
-                name="标普500指数",
-                price="6329.94",
-                change="7.18",
-                percent="0.11",
-            ),
+            assets=(),
+            treasury=None,
         )
 
-        report = await bot._generate_global_report(quotes)
+        report = await bot._generate_global_report(snapshot)
 
         self.assertIn("22484.07", report)
         bot.memory.append_turn.assert_not_awaited()
         bot.memory.recent_messages.assert_not_awaited()
         bot.memory.list_watch.assert_not_awaited()
+
+    async def test_global_report_fetches_snapshot_when_not_injected(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot.settings = SimpleNamespace(timezone="Asia/Shanghai")
+        snapshot = OverseasMarketSnapshot(us_indices=(), assets=(), treasury=None)
+
+        with (
+            patch(
+                "mini_hermes.gateway.telegram.fetch_overseas_snapshot",
+                new=AsyncMock(return_value=snapshot),
+            ) as fetch_snapshot,
+            patch(
+                "mini_hermes.gateway.telegram.compose_global_report",
+                return_value="overseas report",
+            ) as compose,
+        ):
+            report = await bot._generate_global_report()
+
+        self.assertEqual(report, "overseas report")
+        fetch_snapshot.assert_awaited_once_with()
+        compose.assert_called_once()
+        self.assertEqual(compose.call_args.args[1], snapshot)
 
     async def test_deliver_report_reuses_progress_and_returns_all_ids(self) -> None:
         bot = object.__new__(MiniHermesBot)

@@ -22,10 +22,10 @@ from mini_hermes.agent import AgentService
 from mini_hermes.config import Settings
 from mini_hermes.memory import MemoryStore
 from mini_hermes.monitor import system_status
+from mini_hermes.overseas_market import OverseasMarketSnapshot, fetch_overseas_snapshot
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
 from mini_hermes.reporting import compose_global_report
 from mini_hermes.scheduler import parse_daily_time
-from mini_hermes.us_market import UsIndexQuote, fetch_us_quotes
 
 
 LOGGER = logging.getLogger(__name__)
@@ -211,12 +211,12 @@ class MiniHermesBot:
         await self._finish_progress(update, progress, response)
 
     async def _generate_global_report(
-        self, quotes: Sequence[UsIndexQuote] | None = None
+        self, snapshot: OverseasMarketSnapshot | None = None
     ) -> str:
-        if quotes is None:
-            quotes = await fetch_us_quotes()
+        if snapshot is None:
+            snapshot = await fetch_overseas_snapshot()
         report_date = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
-        return compose_global_report(report_date, quotes)
+        return compose_global_report(report_date, snapshot)
 
     async def _deliver_report(
         self,
