@@ -1,8 +1,9 @@
 # Mini Hermes Lite v0.1
 
-低资源、长期在线、Telegram 驱动的 A 股研究 Agent。它使用 PydanticAI 调用
-`quanters-akshare-mcp`，SQLite 保存用户偏好、自选股与短期对话，Telegram JobQueue
-（APScheduler）在每天 08:30 推送晨报。
+低资源、长期在线、Telegram 驱动的 AI Agent 节点。普通私聊消息进入 pi coding
+agent；A 股命令与每日晨报由 PydanticAI 调用 `quanters-akshare-mcp` 完成。SQLite
+保存用户偏好、自选股与短期对话，Telegram JobQueue（APScheduler）在每天 08:30
+推送晨报。
 
 ## 命令
 
@@ -15,23 +16,27 @@
 - `/status`：CPU、内存、MCP、API 状态
 - `/whoami`：显示 Telegram 用户 ID
 
-### pi 完整交互 channel
+### Telegram 单通道
 
-- `/pi`：进入持续 pi 会话，后续普通消息都交给 pi
-- `/pi <任务>`：立即执行任务并进入 pi 模式
+- 普通私聊消息：直接进入持续的 pi 会话，无需切换模式
 - `/new`：新建空白 pi 会话
 - `/abort`：中止当前 pi 任务
 - `/pistatus`：查看 channel 模型和忙碌状态
-- `/hermes`：退出 pi 模式，返回 A 股 Agent
+
+`/stock`、`/market`、`/report` 等 A 股命令始终进入 Mini Hermes。旧的 `/pi` 和
+`/hermes` 命令仅保留兼容提示，不再改变路由状态。
 
 pi 以独立的 `pi-channel` 系统用户运行，拥有完整的编码 Agent 工具，但写入范围限制在
 `/opt/mini-hermes/workspace`。会话保存在 `/var/lib/mini-hermes-pi/sessions`，Telegram
-Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。
+Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。远程执行仅允许白名单
+用户在 Bot 私聊中触发，群聊请求会被拒绝。
 
 ## 安全默认值
 
 `.env` 中未配置 `TELEGRAM_ALLOWED_USER_IDS` 时，Bot 只响应 `/start` 和
 `/whoami`，不会调用模型。模型密钥、Telegram Token 不进入代码或 SQLite。
+
+可选的 `REPORT_MODEL` 可为每日晨报指定独立模型；留空时复用 `MODEL`。
 
 ## 运维
 

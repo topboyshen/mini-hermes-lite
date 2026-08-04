@@ -18,6 +18,7 @@ from telegram.ext import (
 
 from mini_hermes.agent import AgentService
 from mini_hermes.config import Settings
+from mini_hermes.us_market import fetch_us_overview
 from mini_hermes.memory import MemoryStore
 from mini_hermes.monitor import system_status
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
@@ -41,7 +42,6 @@ class MiniHermesBot:
         self.pi_channel = PiChannelClient(
             settings.pi_channel_socket, settings.pi_channel_timeout_seconds
         )
-        self._pi_mode_users: set[int] = set()
         if model_missing:
             LOGGER.warning("agent_disabled missing=%s", ",".join(model_missing))
         self.application = (
@@ -92,8 +92,6 @@ class MiniHermesBot:
                 BotCommand("style", "设置投资风格"),
                 BotCommand("subscribe", "订阅每日晨报"),
                 BotCommand("status", "节点状态"),
-                BotCommand("pi", "进入 pi 完整交互模式"),
-                BotCommand("hermes", "退出 pi 模式，返回 A 股 Agent"),
                 BotCommand("new", "新建 pi 会话"),
                 BotCommand("abort", "中止当前 pi 任务"),
                 BotCommand("pistatus", "pi channel 状态"),
@@ -198,6 +196,10 @@ class MiniHermesBot:
             return
         user, chat = update.effective_user, update.effective_chat
         assert user is not None and chat is not None
+        if chat.type != "private":
+            LOGGER.warning("pi_request_rejected_non_private user_id=%s chat_id=%s", user.id, chat.id)
+            await self._reply(update, "出于安全考虑，pi 远程执行只允许在机器人私聊中使用。")
+            return
         message = update.effective_message
         if message is None:
             return
@@ -242,7 +244,7 @@ class MiniHermesBot:
             return
         await self._reply(
             update,
-            "Mini Hermes Lite 已在线。默认是 A 股研究 Agent；发送 /pi 可进入完整 pi 交互模式。",
+            "Mini Hermes Lite 已在线。普通消息由 pi 处理；A 股研究可使用 /stock、/market、/report。",
         )
 
     async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -265,37 +267,31 @@ class MiniHermesBot:
             "/subscribe — 订阅 08:30 晨报\n"
             "/unsubscribe — 取消晨报\n"
             "/status — 节点状态\n\n"
-            "pi 完整交互：\n"
-            "/pi — 进入 pi 模式（后续普通消息都交给 pi）\n"
-            "/pi 任务内容 — 立即交给 pi 并进入 pi 模式\n"
+            "pi 完整交互（普通消息默认进入 pi）：\n"
             "/new — 新建 pi 会话\n"
             "/abort — 中止当前 pi 任务\n"
-            "/pistatus — 查看 pi channel 状态\n"
-            "/hermes — 退出 pi 模式，回到 A 股 Agent",
+            "/pistatus — 查看 pi channel 状态",
         )
 
     async def pi_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
             return
-        user = update.effective_user
-        assert user is not None
-        self._pi_mode_users.add(user.id)
         if context.args:
             await self._run_pi(update, " ".join(context.args))
             return
         await self._reply(
             update,
-            "已进入 pi 完整交互模式。后续普通消息会保持同一会话；pi 可在隔离工作区读写文件、运行命令和调用工具。\n"
-            "使用 /new 开新会话，/abort 中止任务，/hermes 返回 A 股 Agent。",
+            "普通消息已经默认由 pi 处理，无需切换模式。pi 可在隔离工作区读写文件、运行命令和调用工具。\n"
+            "使用 /new 开新会话，/abort 中止任务；A 股研究使用 /stock、/market、/report。",
         )
 
     async def hermes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
             return
-        user = update.effective_user
-        assert user is not None
-        self._pi_mode_users.discard(user.id)
-        await self._reply(update, "已退出 pi 模式，回到 Mini Hermes A 股研究 Agent。")
+        await self._reply(
+            update,
+            "现在是单一通道，无需切换模式。普通消息由 pi 处理；A 股研究使用 /stock、/market、/report。",
+        )
 
     async def new_pi_session_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -306,7 +302,6 @@ class MiniHermesBot:
         assert user is not None
         try:
             session = await self.pi_channel.new_session(user.id)
-            self._pi_mode_users.add(user.id)
             await self._reply(update, f"已新建 pi 会话：{session[:24]}")
         except PiChannelError as exc:
             await self._reply(update, f"无法新建 pi 会话：{exc}")
@@ -337,8 +332,7 @@ class MiniHermesBot:
                 update,
                 "pi channel: ready\n"
                 f"model: {status.get('model')}\n"
-                f"busy: {status.get('busy')}\n"
-                f"mode: {'pi' if user.id in self._pi_mode_users else 'hermes'}",
+                f"busy: {status.get('busy')}",
             )
         except PiChannelError as exc:
             await self._reply(update, f"pi channel: unavailable\n{exc}")
@@ -433,11 +427,7 @@ class MiniHermesBot:
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         if message is not None and message.text:
-            user = update.effective_user
-            if user is not None and user.id in self._pi_mode_users:
-                await self._run_pi(update, message.text)
-            else:
-                await self._run_agent(update, message.text)
+            await self._run_pi(update, message.text)
 
     async def daily_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.agent is None:
@@ -447,7 +437,21 @@ class MiniHermesBot:
             if user_id not in self.settings.allowed_user_ids:
                 continue
             try:
-                report = await self.agent.run(user_id, "生成今日 A 股晨报，并重点覆盖我的自选股。")
+                us_data = await fetch_us_overview()
+                prompt = "生成今日 A 股晨报，并重点覆盖我的自选股。"
+                if us_data:
+                    prompt = (
+                        "已知美股隔夜收盘数据（新浪财经，已为你拉取，请直接用于「美股隔夜总结」板块，"
+                        "不要再调用工具获取美股）：\n"
+                        + us_data
+                        + "\n\n"
+                        + prompt
+                        + " 晨报需包含「美股隔夜总结」板块，用上面提供的真实数据撰写，"
+                        "并简要点评对 A 股开盘可能的影响。"
+                    )
+                else:
+                    prompt = prompt + " 如能获取到美股数据，简要补充美股隔夜表现。"
+                report = await self.agent.run(user_id, prompt, report=True)
                 for index in range(0, len(report), 4000):
                     await context.bot.send_message(chat_id=chat_id, text=report[index : index + 4000])
             except Exception:  # noqa: BLE001 - one subscriber must not block others

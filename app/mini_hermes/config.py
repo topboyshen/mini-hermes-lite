@@ -32,6 +32,7 @@ class Settings:
     telegram_token: str
     allowed_user_ids: frozenset[int]
     model: str
+    report_model: str
     timezone: str
     daily_report_time: str
     agent_timeout_seconds: int
@@ -51,6 +52,7 @@ class Settings:
             telegram_token=os.getenv("TELEGRAM_TOKEN", "").strip(),
             allowed_user_ids=_int_set(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")),
             model=os.getenv("MODEL", "openai:gpt-5-mini").strip(),
+            report_model=os.getenv("REPORT_MODEL", "").strip(),
             timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai").strip(),
             daily_report_time=os.getenv("DAILY_REPORT_TIME", "08:30").strip(),
             agent_timeout_seconds=int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")),
