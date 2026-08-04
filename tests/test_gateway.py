@@ -72,7 +72,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         report = await bot._generate_global_report(snapshot)
 
-        self.assertIn("22484.07", report)
+        self.assertIn("22,484.07", report)
         bot.memory.append_turn.assert_not_awaited()
         bot.memory.recent_messages.assert_not_awaited()
         bot.memory.list_watch.assert_not_awaited()

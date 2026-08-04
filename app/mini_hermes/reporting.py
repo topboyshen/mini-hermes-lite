@@ -64,6 +64,7 @@ _SHORT_NAMES = {
 }
 _TWO_PLACES = Decimal("0.01")
 _EXPECTED_ASSET_CODES = frozenset({"VIX", "DINIW", "hf_GC", "hf_CL", "BTC-USD"})
+_DIVIDER = "────────────"
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,12 +178,36 @@ def _temperature(average: Decimal | None) -> str:
 
 
 def _format_decimal(value: Decimal, *, signed: bool = False) -> str:
-    rendered = f"{value.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP):f}"
+    rounded = value.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        rounded = abs(rounded)
+    rendered = f"{rounded:f}"
     return f"+{rendered}" if signed and value > 0 else rendered
 
 
 def _previous_close(quote: UsIndexQuote) -> Decimal:
     return _decimal(quote.price) - _decimal(quote.change)
+
+
+def _group_source_number(value: str, *, signed: bool = False) -> str:
+    """Add thousands separators without changing source precision or digits."""
+    number = _decimal(value)
+    text = value.strip()
+    if "e" in text.casefold():
+        rendered = text
+    else:
+        sign = text[:1] if text.startswith(("+", "-")) else ""
+        unsigned = text[1:] if sign else text
+        integer, dot, fraction = unsigned.partition(".")
+        chunks: list[str] = []
+        while integer:
+            chunks.append(integer[-3:])
+            integer = integer[:-3]
+        grouped = ",".join(reversed(chunks)) or "0"
+        rendered = f"{sign}{grouped}{dot}{fraction}"
+    if signed and number > 0 and not rendered.startswith("+"):
+        return f"+{rendered}"
+    return rendered
 
 
 def _rank_indices(stats: IndexStats) -> str:
@@ -193,51 +218,49 @@ def _rank_indices(stats: IndexStats) -> str:
     return " > ".join(groups)
 
 
-def _source_signed(value: str) -> str:
-    number = _decimal(value)
-    return value if value.startswith(("+", "-")) or number <= 0 else f"+{value}"
-
-
 def render_index_snapshot(stats: IndexStats) -> str:
     if not stats.quotes:
-        return "- 美股三大指数数据暂时不可用。"
+        return "暂时不可用"
     return "\n".join(
-        f"- {quote.name}：{quote.price}｜{_source_signed(quote.change)}｜"
-        f"{_source_signed(quote.percent)}%（前收 {_format_decimal(_previous_close(quote))}）"
+        f"{_SHORT_NAMES[quote.code]}｜"
+        f"{_group_source_number(quote.price)}｜"
+        f"{_group_source_number(quote.change, signed=True)}｜"
+        f"{_group_source_number(quote.percent, signed=True)}%"
+        f"（前收 {_format_market_number(_previous_close(quote), grouped=True)}）"
         for quote in stats.quotes
     )
 
 
 def render_index_temperature(stats: IndexStats) -> str:
-    status = "3/3，数值校验通过" if stats.complete else f"{len(stats.quotes)}/3，数据不完整"
-    lines = [f"- 数据状态：{status}"]
+    status = "3/3 · 校验通过" if stats.complete else f"{len(stats.quotes)}/3 · 数据不完整"
+    lines = [f"数据｜{status}"]
     if stats.anomalies:
-        lines.append(f"- 校验提示：{'；'.join(stats.anomalies)}")
+        lines.append(f"校验｜{'；'.join(stats.anomalies)}")
     if not stats.quotes:
         return "\n".join(lines)
-    lines.append(f"- 方向计数：{stats.up} 涨 / {stats.down} 跌 / {stats.flat} 平")
+    lines.append(f"涨跌｜{stats.up} 涨 · {stats.down} 跌 · {stats.flat} 平")
     if stats.average_percent is not None:
         average_label = (
-            "三指数等权平均"
+            "等权"
             if stats.complete
-            else f"已取得指数等权平均（{len(stats.quotes)}/3）"
+            else f"已取得均值（{len(stats.quotes)}/3）"
         )
         lines.append(
-            f"- {average_label}：{_format_decimal(stats.average_percent, signed=True)}%"
-            "（仅作概览，不代表组合收益）"
+            f"{average_label}｜{_format_decimal(stats.average_percent, signed=True)}%"
+            "（仅作概览）"
         )
     if stats.complete and stats.spread_percent is not None:
-        lines.append(f"- 强弱排序：{_rank_indices(stats)}")
+        lines.append(f"排序｜{_rank_indices(stats)}")
         lines.append(
-            f"- 涨跌幅差：{_format_decimal(stats.spread_percent)} 个百分点｜"
-            f"同步度：{stats.synchronization}｜温度：{stats.temperature}"
+            f"分化｜{_format_decimal(stats.spread_percent)}pp · "
+            f"同步：{stats.synchronization} · 温度：{stats.temperature}"
         )
     return "\n".join(lines)
 
 
 def render_index_observations(stats: IndexStats) -> str:
     if not stats.complete or stats.spread_percent is None:
-        return "- 指数数据不完整，暂不作整体结构判断。"
+        return "• 指数数据不完整，暂不作整体结构判断。"
     if stats.up == 3:
         direction = "三项指数同向上涨，指数层面方向一致。"
     elif stats.down == 3:
@@ -250,15 +273,16 @@ def render_index_observations(stats: IndexStats) -> str:
     ranked = sorted(stats.quotes, key=lambda quote: _decimal(quote.percent), reverse=True)
     strongest = ranked[0]
     weakest = ranked[-1]
-    lines = [f"- {direction}"]
+    lines: list[str] = []
     if stats.spread_percent == 0:
-        lines.append("- 三项指数涨跌幅相同，没有相对强弱差异。")
+        lines.append(f"• {direction}三项指数涨跌幅相同。")
     else:
         lines.append(
-            f"- {_SHORT_NAMES[strongest.code]}相对{_SHORT_NAMES[weakest.code]}领先 "
-            f"{_format_decimal(stats.spread_percent)} 个百分点。"
+            f"• {direction.rstrip('。')}；"
+            f"{_SHORT_NAMES[strongest.code]}较{_SHORT_NAMES[weakest.code]}领先"
+            f" {_format_decimal(stats.spread_percent)}pp。"
         )
-    lines.append(f"- 系统温度判定：{stats.temperature}；该标签仅描述指数涨跌幅。")
+    lines.append(f"• 指数温度：{stats.temperature}（仅描述涨跌幅）。")
     return "\n".join(lines)
 
 
@@ -300,7 +324,17 @@ def _format_market_number(
     grouped: bool = False,
 ) -> str:
     rounded = value.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        rounded = abs(rounded)
     rendered = f"{rounded:,.2f}" if grouped else f"{rounded:.2f}"
+    return f"+{rendered}" if signed and value > 0 else rendered
+
+
+def _format_bp(value: Decimal, *, signed: bool = False) -> str:
+    rounded = value.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        rounded = abs(rounded)
+    rendered = f"{rounded:f}".rstrip("0").rstrip(".")
     return f"+{rendered}" if signed and value > 0 else rendered
 
 
@@ -310,8 +344,20 @@ def _asset_percent(quote: CrossAssetQuote, *, prefix: str = "") -> str:
     return f"{prefix}{_format_market_number(quote.percent, signed=True)}%"
 
 
-def _asset_as_of(quote: CrossAssetQuote) -> str:
-    return quote.as_of or "时间未提供"
+def _compact_as_of(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return "时间未知"
+    is_utc = text.endswith("Z")
+    text = text.removesuffix("Z").replace("T", " ")
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        text = text[5:]
+    if " " in text:
+        date_part, time_part = text.split(" ", 1)
+        time_part = time_part.split(".", 1)[0]
+        time_part = ":".join(time_part.split(":")[:2])
+        text = f"{date_part} {time_part}".rstrip()
+    return f"{text} UTC" if is_utc else text
 
 
 def render_cross_asset_snapshot(snapshot: OverseasMarketSnapshot) -> str:
@@ -319,58 +365,53 @@ def render_cross_asset_snapshot(snapshot: OverseasMarketSnapshot) -> str:
     lines: list[str] = []
     vix = assets.get("VIX")
     if vix is not None:
-        change = (
-            _format_market_number(vix.change, signed=True)
-            if vix.change is not None
-            else "变动不可用"
-        )
         lines.append(
-            f"- VIX：{_format_market_number(vix.price)}｜{change}｜"
-            f"{_asset_percent(vix)}｜截至 {_asset_as_of(vix)}"
+            f"波动｜VIX {_format_market_number(vix.price)}｜{_asset_percent(vix)}｜"
+            f"{_vix_band(vix.price)}"
         )
 
     curve = snapshot.treasury
     if curve is not None:
         lines.append(
-            "- 美国国债收益率："
+            "利率｜"
             f"2Y {_format_market_number(curve.two_year)}%"
-            f"（{_format_market_number(curve.two_year_change_bp, signed=True)}bp）｜"
+            f"（{_format_bp(curve.two_year_change_bp, signed=True)}bp）｜"
             f"10Y {_format_market_number(curve.ten_year)}%"
-            f"（{_format_market_number(curve.ten_year_change_bp, signed=True)}bp）｜"
-            f"10Y-2Y {_format_market_number(curve.spread_bp, signed=True)}bp｜"
-            f"截至 {curve.date}"
+            f"（{_format_bp(curve.ten_year_change_bp, signed=True)}bp）"
+        )
+        slope = "正斜率" if curve.spread_bp > 0 else "倒挂" if curve.spread_bp < 0 else "平坦"
+        lines.append(
+            f"曲线｜10Y-2Y {_format_bp(curve.spread_bp, signed=True)}bp｜{slope}"
         )
 
     dollar = assets.get("DINIW")
     if dollar is not None:
         lines.append(
-            f"- 美元指数：{_format_market_number(dollar.price)}｜"
-            f"{_asset_percent(dollar)}｜截至 {_asset_as_of(dollar)}"
+            f"美元｜DXY {_format_market_number(dollar.price)}｜{_asset_percent(dollar)}"
         )
 
     gold = assets.get("hf_GC")
     if gold is not None:
         lines.append(
-            f"- COMEX黄金期货：{_format_market_number(gold.price, grouped=True)} 美元/盎司｜"
-            f"{_asset_percent(gold)}（较前结算价）｜截至 {_asset_as_of(gold)}"
+            f"黄金｜COMEX {_format_market_number(gold.price, grouped=True)} 美元/盎司｜"
+            f"{_asset_percent(gold)}"
         )
 
     crude = assets.get("hf_CL")
     if crude is not None:
         lines.append(
-            f"- WTI原油期货：{_format_market_number(crude.price)} 美元/桶｜"
-            f"{_asset_percent(crude)}（较前结算价）｜截至 {_asset_as_of(crude)}"
+            f"原油｜WTI {_format_market_number(crude.price)} 美元/桶｜{_asset_percent(crude)}"
         )
 
     bitcoin = assets.get("BTC-USD")
     if bitcoin is not None:
         lines.append(
-            f"- BTC现货：${_format_market_number(bitcoin.price, grouped=True)}｜"
-            f"{_asset_percent(bitcoin, prefix='24h ')}｜截至 {_asset_as_of(bitcoin)}"
+            f"加密｜BTC ${_format_market_number(bitcoin.price, grouped=True)}｜"
+            f"{_asset_percent(bitcoin, prefix='24h ')}"
         )
 
     if not lines:
-        return "- 跨资产数据暂时不可用。"
+        return "暂时不可用"
     return "\n".join(lines)
 
 
@@ -395,7 +436,7 @@ def _headline(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
             direction = "涨跌分化"
         summary = (
             f"美股三大指数{direction}，"
-            f"等权{_format_decimal(stats.average_percent, signed=True)}%"
+            f"等权 {_format_decimal(stats.average_percent, signed=True)}%"
         )
         if stats.spread_percent != 0:
             best_percent = max(_decimal(quote.percent) for quote in stats.quotes)
@@ -429,12 +470,12 @@ def _headline(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
         curve = snapshot.treasury
         parts.append(
             f"10Y美债收益率{_movement(curve.ten_year_change_bp, up='上行', down='下行')}"
-            f" {_format_market_number(abs(curve.ten_year_change_bp))}bp"
+            f" {_format_bp(abs(curve.ten_year_change_bp))}bp"
         )
 
     if not parts:
-        return "- 关键市场数据暂不可用，以下仅展示已成功取得的项目。"
-    return f"- {'；'.join(parts)}。"
+        return "关键市场数据暂不可用，以下仅展示已成功取得的项目。"
+    return f"{'；'.join(parts)}。"
 
 
 def _vix_band(price: Decimal) -> str:
@@ -459,18 +500,18 @@ def render_cross_asset_observations(snapshot: OverseasMarketSnapshot) -> str:
                 f" {_format_market_number(abs(vix.percent))}%"
             )
         lines.append(
-            f"- VIX位于系统定义的{_vix_band(vix.price)}{movement}。"
+            f"• VIX位于{_vix_band(vix.price)}{movement}。"
         )
 
     curve = snapshot.treasury
     if curve is not None:
         slope = "正斜率" if curve.spread_bp > 0 else "倒挂" if curve.spread_bp < 0 else "平坦"
         lines.append(
-            f"- 2Y收益率{_movement(curve.two_year_change_bp, up='上行', down='下行')}"
-            f" {_format_market_number(abs(curve.two_year_change_bp))}bp，"
+            f"• 2Y收益率{_movement(curve.two_year_change_bp, up='上行', down='下行')}"
+            f" {_format_bp(abs(curve.two_year_change_bp))}bp，"
             f"10Y收益率{_movement(curve.ten_year_change_bp, up='上行', down='下行')}"
-            f" {_format_market_number(abs(curve.ten_year_change_bp))}bp；"
-            f"期限曲线为{slope}，利差 {_format_market_number(curve.spread_bp, signed=True)}bp。"
+            f" {_format_bp(abs(curve.ten_year_change_bp))}bp；"
+            f"期限曲线为{slope}，利差 {_format_bp(curve.spread_bp, signed=True)}bp。"
         )
 
     dollar = assets.get("DINIW")
@@ -485,7 +526,7 @@ def render_cross_asset_observations(snapshot: OverseasMarketSnapshot) -> str:
         else:
             relation = "反向"
         lines.append(
-            f"- 美元指数{_movement(dollar.percent)} {_format_market_number(abs(dollar.percent))}%，"
+            f"• 美元指数{_movement(dollar.percent)} {_format_market_number(abs(dollar.percent))}%，"
             f"黄金期货{_movement(gold.percent)} {_format_market_number(abs(gold.percent))}%；"
             f"本次方向{relation}，仅作价格关系描述。"
         )
@@ -495,65 +536,114 @@ def render_cross_asset_observations(snapshot: OverseasMarketSnapshot) -> str:
     movement_parts: list[str] = []
     if crude is not None and crude.percent is not None:
         movement_parts.append(
-            f"WTI{_movement(crude.percent)} {_format_market_number(abs(crude.percent))}%"
+            f"WTI {_movement(crude.percent)} {_format_market_number(abs(crude.percent))}%"
         )
     if bitcoin is not None and bitcoin.percent is not None:
         movement_parts.append(
             f"BTC 24h {_movement(bitcoin.percent)} {_format_market_number(abs(bitcoin.percent))}%"
         )
     if movement_parts:
-        lines.append(f"- {'；'.join(movement_parts)}。")
+        lines.append(f"• {'；'.join(movement_parts)}。")
 
-    return "\n".join(lines) if lines else "- 跨资产数据不足，暂不作结构描述。"
+    return "\n".join(lines) if lines else "• 跨资产数据不足，暂不作结构描述。"
 
 
 def render_observation_rules(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
     lines: list[str] = []
     if stats.complete and stats.spread_percent is not None:
-        state = "已超过" if stats.spread_percent > Decimal("0.50") else "未超过"
+        triggered = stats.spread_percent > Decimal("0.50")
+        marker = "●" if triggered else "○"
+        state = "已触发" if triggered else "未触发"
         lines.append(
-            f"- 指数分化线：0.50 个百分点；当前 {_format_decimal(stats.spread_percent)}，{state}。"
+            f"{marker} 指数分化｜{_format_decimal(stats.spread_percent)} / 0.50pp｜{state}"
         )
 
     vix = _asset_map(snapshot).get("VIX")
     if vix is not None:
-        state = "已达到" if vix.price >= Decimal("20") else "未达到"
+        triggered = vix.price >= Decimal("20")
+        marker = "●" if triggered else "○"
+        state = "已触发" if triggered else "未触发"
         lines.append(
-            f"- 波动观察线：VIX 20；当前 {_format_market_number(vix.price)}，{state}。"
+            f"{marker} VIX｜{_format_market_number(vix.price)} / 20｜{state}"
         )
 
     curve = snapshot.treasury
     if curve is not None:
-        state = "已达到" if abs(curve.ten_year_change_bp) >= Decimal("5") else "未达到"
+        triggered = abs(curve.ten_year_change_bp) >= Decimal("5")
+        marker = "●" if triggered else "○"
+        state = "已触发" if triggered else "未触发"
         lines.append(
-            "- 利率日变观察线：10Y绝对变动 5bp；"
-            f"当前 {_format_market_number(curve.ten_year_change_bp, signed=True)}bp，{state}。"
+            f"{marker} 10Y日变｜{_format_bp(curve.ten_year_change_bp, signed=True)}bp / ±5bp｜{state}"
         )
 
-    return "\n".join(lines) if lines else "- 关键数据不足，系统观察条件暂不判定。"
+    return "\n".join(lines) if lines else "关键数据不足，系统观察条件暂不判定。"
 
 
 def _data_notes(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
     assets = _asset_map(snapshot)
     available = len(assets) + (1 if snapshot.treasury is not None else 0)
     sources: list[str] = []
+    sina_items: list[str] = []
     if stats.quotes:
-        sources.append("新浪财经（美股指数）")
-    if any(code in assets for code in ("DINIW", "hf_GC", "hf_CL")):
-        sources.append("新浪财经（美元与期货）")
+        sina_items.append("指数")
+    if "DINIW" in assets:
+        sina_items.append("DXY")
+    if "hf_GC" in assets:
+        sina_items.append("黄金")
+    if "hf_CL" in assets:
+        sina_items.append("WTI")
+    if sina_items:
+        sources.append(f"新浪财经（{'/'.join(sina_items)}）")
     if "VIX" in assets:
         sources.append("Cboe（VIX）")
     if snapshot.treasury is not None:
-        sources.append("美国财政部（美债收益率）")
+        sources.append("美国财政部（美债）")
     if "BTC-USD" in assets:
         sources.append("Coinbase（BTC）")
-    source_text = "、".join(sources) if sources else "本次无可用来源"
-    return (
-        f"- 数据完整度：美股指数 {len(stats.quotes)}/3；跨资产 {available}/6。\n"
-        f"- 本次可用来源：{source_text}。\n"
-        "- 各市场截至时间不同；黄金和原油按前结算价、BTC按24小时开盘价计算涨跌。\n"
-        "- 标题是报告生成日期；美股指数源不提供交易日期，节假日以最新可用收盘值为准。"
+    source_text = "｜".join(sources) if sources else "本次无可用来源"
+
+    times: list[str] = []
+    for code, label in (
+        ("VIX", "VIX"),
+        ("DINIW", "DXY"),
+        ("hf_GC", "黄金"),
+        ("hf_CL", "WTI"),
+        ("BTC-USD", "BTC"),
+    ):
+        quote = assets.get(code)
+        if quote is not None:
+            times.append(f"{label} {_compact_as_of(quote.as_of)}")
+    if snapshot.treasury is not None:
+        times.insert(1, f"美债 {_compact_as_of(snapshot.treasury.date)}")
+
+    lines = [
+        f"完整度｜美股 {len(stats.quotes)}/3 · 跨资产 {available}/6",
+    ]
+    missing: list[str] = []
+    if "VIX" not in assets:
+        missing.append("VIX")
+    if snapshot.treasury is None:
+        missing.append("美债")
+    for code, label in (
+        ("DINIW", "DXY"),
+        ("hf_GC", "黄金"),
+        ("hf_CL", "WTI"),
+        ("BTC-USD", "BTC"),
+    ):
+        if code not in assets:
+            missing.append(label)
+    if missing:
+        lines.append(f"缺失｜{' · '.join(missing)}（本次未取得）")
+    lines.append(f"来源｜{source_text}")
+    for index in range(0, len(times), 3):
+        lines.append(f"时间（各源时区）｜{' · '.join(times[index:index + 3])}")
+    lines.extend(
+        (
+            "口径｜黄金/WTI较前结算价；BTC较24h开盘价",
+            "说明｜标题为生成日期；美股以最新可用收盘值为准",
+        )
     )
+    return "\n".join(lines)
 
 
 def _as_snapshot(
@@ -578,20 +668,26 @@ def compose_global_report(
     observation_rules = render_observation_rules(stats, snapshot)
     data_notes = _data_notes(stats, snapshot)
     return (
-        f"# 海外市场晨报｜{report_date}\n\n"
-        "## 一句话结论\n\n"
+        f"🌐 海外市场晨报｜{report_date}\n"
+        "美股收盘 · 跨资产快照\n"
+        f"{_DIVIDER}\n\n"
+        "🧭 核心结论\n"
         f"{_headline(stats, snapshot)}\n\n"
-        "## 美股收盘\n\n"
+        "📈 美股收盘\n"
         f"{quote_block}\n\n"
-        "## 盘面温度\n\n"
+        "📊 盘面温度\n"
         f"{temperature}\n\n"
-        "## 跨资产温度计\n\n"
+        f"{_DIVIDER}\n\n"
+        "🌍 跨资产温度计\n"
         f"{cross_assets}\n\n"
-        "## 结构观察\n\n"
+        f"{_DIVIDER}\n\n"
+        "🔎 结构观察\n"
         f"{index_analysis}\n{cross_analysis}\n\n"
-        "## 今日观察\n\n"
+        "👀 今日观察\n"
         f"{observation_rules}\n\n"
-        "## 数据说明\n\n"
+        f"{_DIVIDER}\n\n"
+        "ℹ️ 数据说明\n"
         f"{data_notes}\n\n"
-        "_以上阈值仅为系统观察条件，不是预测或交易信号；仅供研究参考，不构成投资建议。_"
+        "监测阈值不是预测或交易信号。\n"
+        "仅供研究参考，不构成投资建议。"
     )
