@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import groupby
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from mini_hermes.overseas_market import (
     CrossAssetQuote,
@@ -72,6 +74,8 @@ class IndexStats:
     quotes: tuple[UsIndexQuote, ...]
     complete: bool
     anomalies: tuple[str, ...]
+    expected_trade_date: date | None
+    trade_date: date | None
     up: int
     down: int
     flat: int
@@ -92,10 +96,103 @@ def _direction(value: Decimal) -> int:
     return 1 if value > 0 else -1 if value < 0 else 0
 
 
-def analyze_indices(quotes: Sequence[UsIndexQuote]) -> IndexStats:
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        first_next_month = date(year + 1, 1, 1)
+    else:
+        first_next_month = date(year, month + 1, 1)
+    candidate = first_next_month - timedelta(days=1)
+    return candidate - timedelta(days=(candidate.weekday() - weekday) % 7)
+
+
+def _observed_fixed_holiday(value: date) -> date:
+    if value.weekday() == 5:
+        return value - timedelta(days=1)
+    if value.weekday() == 6:
+        return value + timedelta(days=1)
+    return value
+
+
+def _easter_sunday(year: int) -> date:
+    """Return Gregorian Easter Sunday using the Meeus/Jones/Butcher algorithm."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    ell = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ell) // 451
+    month = (h + ell - 7 * m + 114) // 31
+    day = (h + ell - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def _us_market_holidays(year: int) -> frozenset[date]:
+    holidays = {
+        _observed_fixed_holiday(date(year, 1, 1)),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _last_weekday(year, 5, 0),  # Memorial Day
+        _observed_fixed_holiday(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+        _observed_fixed_holiday(date(year, 12, 25)),
+    }
+    if year >= 2022:
+        holidays.add(_observed_fixed_holiday(date(year, 6, 19)))
+    return frozenset(holidays)
+
+
+def expected_us_trade_date(
+    report_date: str | date,
+    *,
+    generated_at: datetime | None = None,
+) -> date:
+    """Return the last expected regular US market session before a report date.
+
+    This intentionally errs toward a degraded report on extraordinary closures:
+    an unexpected session-date mismatch must never be presented as fresh data.
+    """
+    generated = date.fromisoformat(report_date) if isinstance(report_date, str) else report_date
+    if generated_at is None:
+        candidate = generated - timedelta(days=1)
+    else:
+        if generated_at.tzinfo is None:
+            raise ValueError("generated_at must be timezone-aware")
+        new_york_now = generated_at.astimezone(ZoneInfo("America/New_York"))
+        # Sina's final index records can settle well after the 16:00 close.
+        # Before 18:00 ET, fail closed to the prior completed session.
+        candidate = new_york_now.date()
+        if new_york_now.timetz().replace(tzinfo=None) < time(18, 0):
+            candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5 or candidate in _us_market_holidays(candidate.year):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def analyze_indices(
+    quotes: Sequence[UsIndexQuote],
+    *,
+    expected_trade_date: date | None = None,
+    generated_at: datetime | None = None,
+) -> IndexStats:
     valid: list[UsIndexQuote] = []
     anomalies: list[str] = []
     seen: set[str] = set()
+    generated_market_time: datetime | None = None
+    if generated_at is not None:
+        if generated_at.tzinfo is None:
+            raise ValueError("generated_at must be timezone-aware")
+        generated_market_time = generated_at.astimezone(ZoneInfo("America/New_York"))
     for quote in quotes:
         if quote.code not in _EXPECTED_US_CODES:
             anomalies.append(f"未知指数代码 {quote.code}")
@@ -104,6 +201,27 @@ def analyze_indices(quotes: Sequence[UsIndexQuote]) -> IndexStats:
             anomalies.append(f"指数 {quote.code} 重复")
             continue
         seen.add(quote.code)
+        if quote.observed_at.tzinfo is None or quote.observed_at.utcoffset() is None:
+            anomalies.append(f"指数 {quote.code} 时间戳无时区")
+            continue
+        observed_market_time = quote.observed_at.astimezone(
+            ZoneInfo("America/New_York")
+        )
+        if observed_market_time.timetz().replace(tzinfo=None) < time(16, 0):
+            anomalies.append(f"指数 {quote.code} 尚未到常规收盘")
+            continue
+        if (
+            generated_market_time is not None
+            and observed_market_time > generated_market_time
+        ):
+            anomalies.append(f"指数 {quote.code} 时间戳晚于报告生成时间")
+            continue
+        if expected_trade_date is not None and quote.trade_date != expected_trade_date:
+            anomalies.append(
+                f"指数 {quote.code} 交易日 {quote.trade_date.isoformat()}，"
+                f"预期 {expected_trade_date.isoformat()}"
+            )
+            continue
         try:
             price = _decimal(quote.price)
             change = _decimal(quote.change)
@@ -130,6 +248,10 @@ def analyze_indices(quotes: Sequence[UsIndexQuote]) -> IndexStats:
     ordered = tuple(sorted(valid, key=lambda quote: _DISPLAY_ORDER[quote.code]))
     percents = [_decimal(quote.percent) for quote in ordered]
     changes = [_decimal(quote.change) for quote in ordered]
+    trade_dates = {quote.trade_date for quote in ordered}
+    trade_date = next(iter(trade_dates)) if len(trade_dates) == 1 else None
+    if len(trade_dates) > 1:
+        anomalies.append("指数交易日不一致")
     # Direction comes from the unrounded point change.  Percentage strings may
     # legitimately round a very small move to 0.00.
     up = sum(value > 0 for value in changes)
@@ -137,7 +259,12 @@ def analyze_indices(quotes: Sequence[UsIndexQuote]) -> IndexStats:
     flat = sum(value == 0 for value in changes)
     average = sum(percents, Decimal("0")) / len(percents) if percents else None
     spread = max(percents) - min(percents) if percents else None
-    complete = len(ordered) == 3 and {quote.code for quote in ordered} == _EXPECTED_US_CODES
+    complete = (
+        len(ordered) == 3
+        and {quote.code for quote in ordered} == _EXPECTED_US_CODES
+        and trade_date is not None
+        and (expected_trade_date is None or trade_date == expected_trade_date)
+    )
 
     if not complete or spread is None:
         synchronization = "不判定"
@@ -153,6 +280,8 @@ def analyze_indices(quotes: Sequence[UsIndexQuote]) -> IndexStats:
         quotes=ordered,
         complete=complete,
         anomalies=tuple(anomalies),
+        expected_trade_date=expected_trade_date,
+        trade_date=trade_date,
         up=up,
         down=down,
         flat=flat,
@@ -232,11 +361,21 @@ def render_index_snapshot(stats: IndexStats) -> str:
 
 
 def render_index_temperature(stats: IndexStats) -> str:
-    status = "3/3 · 校验通过" if stats.complete else f"{len(stats.quotes)}/3 · 数据不完整"
+    status = (
+        "3/3 · 交易日校验通过"
+        if stats.complete
+        else f"{len(stats.quotes)}/3 · 数据不完整或已过期"
+    )
     lines = [f"数据｜{status}"]
+    if stats.trade_date is not None:
+        lines.append(f"交易日｜{stats.trade_date.isoformat()}（美东）")
+    elif stats.expected_trade_date is not None:
+        lines.append(f"期望交易日｜{stats.expected_trade_date.isoformat()}（美东）")
     if stats.anomalies:
         lines.append(f"校验｜{'；'.join(stats.anomalies)}")
-    if not stats.quotes:
+    if not stats.complete:
+        if stats.quotes:
+            lines.append(f"已验收｜{len(stats.quotes)}/3，仅展示明细，不作整体判断")
         return "\n".join(lines)
     lines.append(f"涨跌｜{stats.up} 涨 · {stats.down} 跌 · {stats.flat} 平")
     if stats.average_percent is not None:
@@ -594,6 +733,8 @@ def _data_notes(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
         sina_items.append("WTI")
     if sina_items:
         sources.append(f"新浪财经（{'/'.join(sina_items)}）")
+    if snapshot.us_indices and not stats.quotes:
+        sources.append("新浪财经（指数未通过校验）")
     if "VIX" in assets:
         sources.append("Cboe（VIX）")
     if snapshot.treasury is not None:
@@ -603,6 +744,8 @@ def _data_notes(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
     source_text = "｜".join(sources) if sources else "本次无可用来源"
 
     times: list[str] = []
+    if stats.trade_date is not None:
+        times.append(f"美股 {stats.trade_date.isoformat()} 收盘")
     for code, label in (
         ("VIX", "VIX"),
         ("DINIW", "DXY"),
@@ -620,6 +763,8 @@ def _data_notes(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
         f"完整度｜美股 {len(stats.quotes)}/3 · 跨资产 {available}/6",
     ]
     missing: list[str] = []
+    if not stats.complete:
+        missing.append(f"美股指数（{3 - len(stats.quotes)} 项缺失或未通过）")
     if "VIX" not in assets:
         missing.append("VIX")
     if snapshot.treasury is None:
@@ -640,7 +785,7 @@ def _data_notes(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
     lines.extend(
         (
             "口径｜黄金/WTI较前结算价；BTC较24h开盘价",
-            "说明｜标题为生成日期；美股以最新可用收盘值为准",
+            "说明｜标题为生成日期；美股仅接受预期最近交易日的收盘值",
         )
     )
     return "\n".join(lines)
@@ -657,9 +802,19 @@ def _as_snapshot(
 def compose_global_report(
     report_date: str,
     data: OverseasMarketSnapshot | Sequence[UsIndexQuote],
+    *,
+    generated_at: datetime | None = None,
 ) -> str:
     snapshot = _as_snapshot(data)
-    stats = analyze_indices(snapshot.us_indices)
+    expected_trade_day = expected_us_trade_date(
+        report_date,
+        generated_at=generated_at,
+    )
+    stats = analyze_indices(
+        snapshot.us_indices,
+        expected_trade_date=expected_trade_day,
+        generated_at=generated_at,
+    )
     quote_block = render_index_snapshot(stats)
     temperature = render_index_temperature(stats)
     index_analysis = render_index_observations(stats)

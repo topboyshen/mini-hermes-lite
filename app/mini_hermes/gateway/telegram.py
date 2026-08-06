@@ -215,8 +215,13 @@ class MiniHermesBot:
     ) -> str:
         if snapshot is None:
             snapshot = await fetch_overseas_snapshot()
-        report_date = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
-        return compose_global_report(report_date, snapshot)
+        generated_at = datetime.now(ZoneInfo(self.settings.timezone))
+        report_date = generated_at.date().isoformat()
+        return compose_global_report(
+            report_date,
+            snapshot,
+            generated_at=generated_at,
+        )
 
     async def _deliver_report(
         self,

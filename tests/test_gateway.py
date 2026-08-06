@@ -2,6 +2,7 @@ from datetime import datetime
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 from mini_hermes.gateway.telegram import MiniHermesBot, ReportDeliveryError
 from mini_hermes.overseas_market import OverseasMarketSnapshot
@@ -47,32 +48,68 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
                 UsIndexQuote(
                     code="int_dji",
                     name="道琼斯工业指数",
-                    price="44563.12",
-                    change="10.50",
-                    percent="0.02",
+                    price="54349.1211",
+                    change="263.2400",
+                    percent="0.49",
+                    as_of="2026-08-06 05:15:59",
+                    observed_at=datetime(
+                        2026,
+                        8,
+                        5,
+                        17,
+                        15,
+                        tzinfo=ZoneInfo("America/New_York"),
+                    ),
                 ),
                 UsIndexQuote(
                     code="int_nasdaq",
                     name="纳斯达克综合指数",
-                    price="22484.07",
-                    change="99.37",
-                    percent="0.44",
+                    price="26363.4393",
+                    change="-221.5537",
+                    percent="-0.83",
+                    as_of="2026-08-06 05:15:59",
+                    observed_at=datetime(
+                        2026,
+                        8,
+                        5,
+                        17,
+                        15,
+                        tzinfo=ZoneInfo("America/New_York"),
+                    ),
                 ),
                 UsIndexQuote(
                     code="int_sp500",
                     name="标普500指数",
-                    price="6329.94",
-                    change="7.18",
-                    percent="0.11",
+                    price="7723.5498",
+                    change="-12.9700",
+                    percent="-0.17",
+                    as_of="2026-08-06 05:15:59",
+                    observed_at=datetime(
+                        2026,
+                        8,
+                        5,
+                        17,
+                        15,
+                        tzinfo=ZoneInfo("America/New_York"),
+                    ),
                 ),
             ),
             assets=(),
             treasury=None,
         )
 
-        report = await bot._generate_global_report(snapshot)
+        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+            clock.now.return_value = datetime(
+                2026,
+                8,
+                6,
+                8,
+                30,
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            )
+            report = await bot._generate_global_report(snapshot)
 
-        self.assertIn("22,484.07", report)
+        self.assertIn("26,363.4393", report)
         bot.memory.append_turn.assert_not_awaited()
         bot.memory.recent_messages.assert_not_awaited()
         bot.memory.list_watch.assert_not_awaited()
@@ -91,13 +128,26 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
                 "mini_hermes.gateway.telegram.compose_global_report",
                 return_value="overseas report",
             ) as compose,
+            patch("mini_hermes.gateway.telegram.datetime") as clock,
         ):
+            clock.now.return_value = datetime(
+                2026,
+                8,
+                6,
+                8,
+                30,
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            )
             report = await bot._generate_global_report()
 
         self.assertEqual(report, "overseas report")
         fetch_snapshot.assert_awaited_once_with()
         compose.assert_called_once()
         self.assertEqual(compose.call_args.args[1], snapshot)
+        self.assertEqual(
+            compose.call_args.kwargs["generated_at"],
+            clock.now.return_value,
+        )
 
     async def test_deliver_report_reuses_progress_and_returns_all_ids(self) -> None:
         bot = object.__new__(MiniHermesBot)

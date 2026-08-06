@@ -2,25 +2,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 import logging
 import re
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 import httpx
 
 
 LOGGER = logging.getLogger(__name__)
 
-_SINA_URL = "https://hq.sinajs.cn/list=int_dji,int_nasdaq,int_sp500"
+_SINA_URL = "https://hq.sinajs.cn/list=gb_dji,gb_ixic,gb_inx"
 _SINA_HEADERS = {
     "Referer": "https://finance.sina.com.cn",
     "User-Agent": "Mozilla/5.0 mini-hermes/0.1",
 }
 _INDICES = {
-    "int_dji": "道琼斯工业指数",
-    "int_nasdaq": "纳斯达克综合指数",
-    "int_sp500": "标普500指数",
+    "int_dji": ("gb_dji", "道琼斯工业指数"),
+    "int_nasdaq": ("gb_ixic", "纳斯达克综合指数"),
+    "int_sp500": ("gb_inx", "标普500指数"),
 }
+_SINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_MARKET_TIMEZONE = ZoneInfo("America/New_York")
+_AS_OF_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,24 +35,40 @@ class UsIndexQuote:
     price: str
     change: str
     percent: str
+    as_of: str
+    observed_at: datetime
+
+    @property
+    def trade_date(self) -> date:
+        return self.observed_at.date()
+
+
+def _market_timestamp(as_of: str) -> datetime:
+    observed_at = datetime.strptime(as_of.strip(), _AS_OF_FORMAT).replace(
+        tzinfo=_SINA_TIMEZONE
+    )
+    return observed_at.astimezone(_MARKET_TIMEZONE)
 
 
 def parse_us_quotes(raw: str) -> tuple[UsIndexQuote, ...]:
     """Parse quotes while preserving the source number strings exactly."""
     quotes: list[UsIndexQuote] = []
-    for code, name in _INDICES.items():
-        match = re.search(rf'var\s+hq_str_{re.escape(code)}="([^"]*)"', raw)
+    for code, (source_code, name) in _INDICES.items():
+        match = re.search(
+            rf'var\s+hq_str_{re.escape(source_code)}="([^"]*)"', raw
+        )
         if match is None or not match.group(1):
             continue
         parts = match.group(1).split(",")
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
-        price, change, percent = parts[1:4]
+        price, percent, as_of, change = parts[1:5]
         try:
             float(price)
             float(change)
             float(percent)
-        except ValueError:
+            observed_at = _market_timestamp(as_of)
+        except (ValueError, OverflowError):
             continue
         quotes.append(
             UsIndexQuote(
@@ -56,6 +77,8 @@ def parse_us_quotes(raw: str) -> tuple[UsIndexQuote, ...]:
                 price=price,
                 change=change,
                 percent=percent,
+                as_of=as_of,
+                observed_at=observed_at,
             )
         )
     return tuple(quotes)

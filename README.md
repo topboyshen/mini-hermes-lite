@@ -33,6 +33,10 @@ agent；A 股命令由 PydanticAI 调用 `quanters-akshare-mcp` 完成，海外�
 08:30 推送，通常为周二至周六。旧的 `/pi` 和 `/hermes` 命令仅保留兼容提示，不再改变
 路由状态。
 
+美股三大指数使用带源时间戳的行情，并换算为美东交易日期。三项数据必须来自同一个、
+符合 NYSE 常规交易日历的最近已完成交易日；日期缺失、不一致、过期或仍处于美股盘中时，
+报告会明确降级并停止生成指数方向、排序、温度及阈值结论。
+
 pi 以独立的 `pi-channel` 系统用户运行，拥有完整的编码 Agent 工具，但写入范围限制在
 `/opt/mini-hermes/workspace`。会话保存在 `/var/lib/mini-hermes-pi/sessions`，Telegram
 Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。远程执行仅允许白名单

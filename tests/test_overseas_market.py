@@ -1,7 +1,9 @@
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 from mini_hermes import overseas_market
 from mini_hermes.overseas_market import (
@@ -160,7 +162,22 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_sources_share_client_and_one_failure_does_not_abort_snapshot(self) -> None:
         fake_client = _FakeClient()
         seen_clients: list[object] = []
-        us_quote = UsIndexQuote("int_dji", "Dow", "1", "1", "1")
+        us_quote = UsIndexQuote(
+            "int_dji",
+            "Dow",
+            "1",
+            "1",
+            "1",
+            "2026-08-06 05:15:59",
+            datetime(
+                2026,
+                8,
+                5,
+                17,
+                15,
+                tzinfo=ZoneInfo("America/New_York"),
+            ),
+        )
         gold = CrossAssetQuote(
             code="hf_GC",
             name="Gold",
