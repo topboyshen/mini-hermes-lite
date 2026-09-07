@@ -17,13 +17,15 @@ from xml.etree import ElementTree
 
 import httpx
 
+from mini_hermes.market_context import MarketContext, fetch_market_context
 from mini_hermes.us_market import UsIndexQuote, fetch_us_quotes
 
 
 LOGGER = logging.getLogger(__name__)
 
-_SINA_FUTURES_URL = "https://hq.sinajs.cn/list=hf_GC,hf_CL"
+_SINA_FUTURES_URL = "https://hq.sinajs.cn/list=hf_GC,hf_CL,hf_SI"
 _SINA_DOLLAR_URL = "https://hq.sinajs.cn/list=DINIW"
+_SINA_REGIONAL_URL = "https://hq.sinajs.cn/list=int_nikkei,int_hangseng,int_ftse"
 _CBOE_VIX_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
 _TREASURY_URL = (
     "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
@@ -44,6 +46,12 @@ _JSON_HEADERS = {
 _FUTURES = {
     "hf_GC": ("COMEX黄金", "USD/oz"),
     "hf_CL": ("WTI原油", "USD/barrel"),
+    "hf_SI": ("COMEX白银", "USD/oz"),
+}
+_REGIONAL_INDICES = {
+    "int_nikkei": "日经225",
+    "int_hangseng": "恒生指数",
+    "int_ftse": "富时100",
 }
 
 
@@ -65,6 +73,18 @@ class CrossAssetQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class RegionalIndexQuote:
+    """One overseas equity index quote from Sina's compact int_* feed."""
+
+    code: str
+    name: str
+    price: Decimal
+    change: Decimal
+    percent: Decimal
+    source: str = "Sina Finance"
+
+
+@dataclass(frozen=True, slots=True)
 class TreasuryCurve:
     """Latest two Treasury curve observations and deterministic deltas."""
 
@@ -75,6 +95,10 @@ class TreasuryCurve:
     two_year_change_bp: Decimal
     ten_year_change_bp: Decimal
     spread_bp: Decimal
+    three_month: Decimal | None = None
+    thirty_year: Decimal | None = None
+    three_month_change_bp: Decimal | None = None
+    thirty_year_change_bp: Decimal | None = None
     source: str = "U.S. Department of the Treasury"
 
 
@@ -85,6 +109,8 @@ class OverseasMarketSnapshot:
     us_indices: tuple[UsIndexQuote, ...]
     assets: tuple[CrossAssetQuote, ...]
     treasury: TreasuryCurve | None
+    regional_indices: tuple[RegionalIndexQuote, ...] = ()
+    market_context: MarketContext | None = None
 
 
 def _decimal(value: Any) -> Decimal:
@@ -124,7 +150,7 @@ def _as_of(date: str, time: str = "") -> str:
 
 
 def parse_sina_hf_quotes(raw: str) -> tuple[CrossAssetQuote, ...]:
-    """Parse Sina ``hf_GC`` and ``hf_CL`` records using their fixed positions."""
+    """Parse Sina hf_GC, hf_CL and hf_SI records using fixed positions."""
     quotes: list[CrossAssetQuote] = []
     for code, (fallback_name, unit) in _FUTURES.items():
         parts = _sina_record(raw, code)
@@ -152,6 +178,35 @@ def parse_sina_hf_quotes(raw: str) -> tuple[CrossAssetQuote, ...]:
                 as_of=_as_of(parts[12], parts[6]),
                 unit=unit,
                 source="Sina Finance",
+            )
+        )
+    return tuple(quotes)
+
+
+def parse_sina_regional_quotes(raw: str) -> tuple[RegionalIndexQuote, ...]:
+    """Parse compact Sina ``int_*`` records: name,price,change,percent."""
+    quotes: list[RegionalIndexQuote] = []
+    for code, fallback_name in _REGIONAL_INDICES.items():
+        parts = _sina_record(raw, code)
+        if parts is None or len(parts) < 4:
+            continue
+        try:
+            price = _decimal(parts[1])
+            change = _decimal(parts[2])
+            percent = _decimal(parts[3])
+        except ValueError:
+            continue
+        if price <= 0:
+            continue
+        if change != 0 and percent != 0 and (change > 0) != (percent > 0):
+            continue
+        quotes.append(
+            RegionalIndexQuote(
+                code=code,
+                name=parts[0] or fallback_name,
+                price=price,
+                change=change,
+                percent=percent,
             )
         )
     return tuple(quotes)
@@ -221,9 +276,18 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _treasury_rows(raw: str | bytes) -> list[tuple[str, Decimal, Decimal]]:
+def _optional_decimal(value: str | None) -> Decimal | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return _decimal(value)
+    except ValueError:
+        return None
+
+
+def _treasury_rows(raw: str | bytes) -> list[dict[str, Decimal | str]]:
     root = ElementTree.fromstring(raw)
-    rows: list[tuple[str, Decimal, Decimal]] = []
+    rows: list[dict[str, Decimal | str]] = []
     for node in root.iter():
         if _local_name(node.tag) != "properties":
             continue
@@ -237,9 +301,28 @@ def _treasury_rows(raw: str | bytes) -> list[tuple[str, Decimal, Decimal]]:
             ten_year = _decimal(values.get("BC_10YEAR"))
         except ValueError:
             continue
-        if date:
-            rows.append((date, two_year, ten_year))
+        if not date:
+            continue
+        rows.append(
+            {
+                "date": date,
+                "two_year": two_year,
+                "ten_year": ten_year,
+                "three_month": _optional_decimal(values.get("BC_3MONTH")),
+                "thirty_year": _optional_decimal(values.get("BC_30YEAR")),
+            }
+        )
     return rows
+
+
+def _tenor_change_bp(
+    current: Decimal | None,
+    previous: Decimal | None,
+    basis_points: Decimal,
+) -> Decimal | None:
+    if current is None or previous is None:
+        return None
+    return (current - previous) * basis_points
 
 
 def parse_treasury_curve(raw: str | bytes) -> TreasuryCurve | None:
@@ -250,18 +333,34 @@ def parse_treasury_curve(raw: str | bytes) -> TreasuryCurve | None:
         return None
     if len(rows) < 2:
         return None
-    rows.sort(key=lambda item: item[0])
-    previous_date, previous_two, previous_ten = rows[-2]
-    date, two_year, ten_year = rows[-1]
+    rows.sort(key=lambda item: str(item["date"]))
+    previous = rows[-2]
+    latest = rows[-1]
     basis_points = Decimal("100")
+    two_year = Decimal(str(latest["two_year"]))
+    ten_year = Decimal(str(latest["ten_year"]))
+    previous_two = Decimal(str(previous["two_year"]))
+    previous_ten = Decimal(str(previous["ten_year"]))
+    three_month = latest["three_month"] if isinstance(latest["three_month"], Decimal) else None
+    thirty_year = latest["thirty_year"] if isinstance(latest["thirty_year"], Decimal) else None
+    previous_three = (
+        previous["three_month"] if isinstance(previous["three_month"], Decimal) else None
+    )
+    previous_thirty = (
+        previous["thirty_year"] if isinstance(previous["thirty_year"], Decimal) else None
+    )
     return TreasuryCurve(
-        date=date,
-        previous_date=previous_date,
+        date=str(latest["date"]),
+        previous_date=str(previous["date"]),
         two_year=two_year,
         ten_year=ten_year,
         two_year_change_bp=(two_year - previous_two) * basis_points,
         ten_year_change_bp=(ten_year - previous_ten) * basis_points,
         spread_bp=(ten_year - two_year) * basis_points,
+        three_month=three_month,
+        thirty_year=thirty_year,
+        three_month_change_bp=_tenor_change_bp(three_month, previous_three, basis_points),
+        thirty_year_change_bp=_tenor_change_bp(thirty_year, previous_thirty, basis_points),
     )
 
 
@@ -314,6 +413,18 @@ async def _fetch_sina_dollar(client: httpx.AsyncClient) -> CrossAssetQuote:
     return quote
 
 
+async def _fetch_sina_regional(client: httpx.AsyncClient) -> tuple[RegionalIndexQuote, ...]:
+    response = await client.get(_SINA_REGIONAL_URL, headers=_SINA_HEADERS)
+    response.raise_for_status()
+    quotes = parse_sina_regional_quotes(response.content.decode("gbk", errors="replace"))
+    if not quotes:
+        raise ValueError("no valid regional index records")
+    returned = {quote.code for quote in quotes}
+    for code in _REGIONAL_INDICES.keys() - returned:
+        LOGGER.warning("overseas_regional_parse_missing source=sina code=%s", code)
+    return quotes
+
+
 async def _fetch_cboe_vix(client: httpx.AsyncClient) -> CrossAssetQuote:
     response = await client.get(_CBOE_VIX_URL, headers=_JSON_HEADERS)
     response.raise_for_status()
@@ -363,18 +474,28 @@ async def _safe_fetch(
 async def fetch_overseas_snapshot(
     *,
     year: int | None = None,
+    now: datetime | None = None,
 ) -> OverseasMarketSnapshot:
     """Fetch all sources concurrently, degrading each source independently."""
-    treasury_year = year if year is not None else datetime.now(UTC).year
+    observed_at = now or datetime.now(UTC)
+    if observed_at.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    treasury_year = year if year is not None else observed_at.year
     us_task = asyncio.create_task(_safe_fetch("sina_us", fetch_us_quotes(), ()))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        futures, dollar, vix, treasury, btc = await asyncio.gather(
+        futures, dollar, vix, treasury, btc, regional, market_context = await asyncio.gather(
             _safe_fetch("sina_futures", _fetch_sina_futures(client), ()),
             _safe_fetch("sina_dollar", _fetch_sina_dollar(client), None),
             _safe_fetch("cboe_vix", _fetch_cboe_vix(client), None),
             _safe_fetch("us_treasury", _fetch_treasury(client, treasury_year), None),
             _safe_fetch("coinbase_btc", _fetch_coinbase_btc(client), None),
+            _safe_fetch("sina_regional", _fetch_sina_regional(client), ()),
+            _safe_fetch(
+                "official_market_context",
+                fetch_market_context(client, now=observed_at),
+                MarketContext(),
+            ),
         )
     us_indices = await us_task
 
@@ -384,4 +505,6 @@ async def fetch_overseas_snapshot(
         us_indices=tuple(us_indices),
         assets=tuple(assets),
         treasury=treasury,
+        regional_indices=tuple(regional),
+        market_context=market_context,
     )

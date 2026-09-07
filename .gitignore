@@ -1,31 +1,33 @@
-# Secrets and local configuration
+# Secrets and machine-local configuration
 .env
+.env.*
 !.env.example
 *.pem
 *.key
-auth.json
 
-# Python
+# Runtime state and user data
+data/
+workspace/
+*.db
+*.db-*
+*.sqlite*
+*.sock
+*.log
+*.log.*
+
+# Local environments and generated files
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# Runtime state
-data/
-logs/
-workspace/
-sessions/
-*.db
-*.db-*
-*.sqlite*
-*.log
-*.sock
-
-# Editors and operating systems
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
+# Historical one-off copies are intentionally outside version tracking
+backups/
+*.bak
+*.bak.*
+*.bak-*

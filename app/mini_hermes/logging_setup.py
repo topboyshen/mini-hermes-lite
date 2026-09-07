@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import WatchedFileHandler
 from pathlib import Path
 
 
@@ -11,10 +11,11 @@ def setup_logging(log_dir: Path) -> None:
         "%(asctime)s %(levelname)s %(name)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
-    file_handler = RotatingFileHandler(
+    # Rotation is owned by /etc/logrotate.d/mini-hermes. WatchedFileHandler
+    # detects the inode change after logrotate renames the file and reopens the
+    # newly created path on the next log record.
+    file_handler = WatchedFileHandler(
         log_dir / "mini-hermes.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)

@@ -35,3 +35,4 @@ async def run_selftest(settings: Settings) -> int:
         for item in checks["mcp"]  # type: ignore[union-attr]
     )
     return 0 if checks["database"] == "ok" and mcp_ok else 1
+

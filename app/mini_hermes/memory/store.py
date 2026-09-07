@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 import sqlite3
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _valid_report_id(value: str) -> bool:
+    return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
 
 
 class MemoryStore:
@@ -51,8 +56,6 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_conversations_user_id
                 ON conversations(user_id, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_conversations_user_channel
-                ON conversations(user_id, channel, id DESC);
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -60,19 +63,41 @@ class MemoryStore:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS market_reports (
+                report_date TEXT PRIMARY KEY,
+                report_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_reports_date
+                ON market_reports(report_date DESC);
+            CREATE TABLE IF NOT EXISTS market_report_details (
+                report_id TEXT PRIMARY KEY,
+                report_date TEXT NOT NULL,
+                report_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_report_details_created
+                ON market_report_details(created_at DESC);
             """
         )
         self._migrate_conversation_channel()
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversations_user_channel
+                ON conversations(user_id, channel, id DESC)
+            """
+        )
         self._connection.commit()
+
 
     def _migrate_conversation_channel(self) -> None:
         """Add channel column to pre-existing SQLite DBs; default existing rows to hermes."""
         columns = {
-            str(row[1])
-            for row in self._db().execute("PRAGMA table_info(conversations)").fetchall()
+            row[1] for row in self._connection.execute("PRAGMA table_info(conversations)")
         }
         if "channel" not in columns:
-            self._db().execute(
+            self._connection.execute(
                 "ALTER TABLE conversations ADD COLUMN channel TEXT NOT NULL DEFAULT 'hermes'"
             )
 
@@ -207,6 +232,7 @@ class MemoryStore:
             )
             self._db().commit()
 
+
     async def set_subscription(self, user_id: int, chat_id: int, enabled: bool) -> None:
         async with self._lock:
             self._db().execute(
@@ -228,6 +254,88 @@ class MemoryStore:
                 "SELECT user_id, chat_id FROM subscriptions WHERE enabled=1"
             ).fetchall()
             return [(int(row["user_id"]), int(row["chat_id"])) for row in rows]
+
+    async def save_market_report(self, report_date: str, report_text: str) -> None:
+        """Store one generated daily report without any portfolio information."""
+        if not report_date or not report_text.strip():
+            raise ValueError("report_date and report_text are required")
+        timestamp = _now()
+        async with self._lock:
+            self._db().execute(
+                """
+                INSERT INTO market_reports(report_date, report_text, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(report_date) DO UPDATE SET
+                    report_text=excluded.report_text,
+                    updated_at=excluded.updated_at
+                """,
+                (report_date, report_text, timestamp, timestamp),
+            )
+            report_id = sha256(report_text.encode("utf-8")).hexdigest()[:32]
+            self._db().execute(
+                """
+                INSERT OR IGNORE INTO market_report_details(
+                    report_id, report_date, report_text, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (report_id, report_date, report_text, timestamp),
+            )
+            # A short rolling window is enough for weekly summaries and avoids
+            # turning this into an unnecessary long-term market archive.
+            self._db().execute(
+                """
+                DELETE FROM market_reports WHERE report_date NOT IN (
+                    SELECT report_date FROM market_reports
+                    ORDER BY report_date DESC LIMIT 40
+                )
+                """
+            )
+            # Keep immutable button targets for recent reports. The canonical
+            # daily row above can still be updated for weekly summaries.
+            self._db().execute(
+                """
+                DELETE FROM market_report_details WHERE report_id NOT IN (
+                    SELECT report_id FROM market_report_details
+                    ORDER BY created_at DESC, rowid DESC LIMIT 120
+                )
+                """
+            )
+            self._db().commit()
+
+    async def market_reports_between(
+        self, start_date: str, end_date: str
+    ) -> list[tuple[str, str]]:
+        async with self._lock:
+            rows = self._db().execute(
+                """
+                SELECT report_date, report_text FROM market_reports
+                WHERE report_date BETWEEN ? AND ?
+                ORDER BY report_date
+                """,
+                (start_date, end_date),
+            ).fetchall()
+            return [
+                (str(row["report_date"]), str(row["report_text"]))
+                for row in rows
+            ]
+
+    async def market_report(self, report_date: str) -> str | None:
+        async with self._lock:
+            row = self._db().execute(
+                "SELECT report_text FROM market_reports WHERE report_date=?",
+                (report_date,),
+            ).fetchone()
+            return str(row["report_text"]) if row is not None else None
+
+    async def market_report_detail(self, report_id: str) -> str | None:
+        if not _valid_report_id(report_id):
+            return None
+        async with self._lock:
+            row = self._db().execute(
+                "SELECT report_text FROM market_report_details WHERE report_id=?",
+                (report_id,),
+            ).fetchone()
+            return str(row["report_text"]) if row is not None else None
 
     async def stats(self) -> dict[str, int]:
         async with self._lock:

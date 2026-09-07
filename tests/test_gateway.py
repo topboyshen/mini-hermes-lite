@@ -1,73 +1,25 @@
 from datetime import datetime
+from hashlib import sha256
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from mini_hermes.gateway.telegram import (
-    MiniHermesBot,
-    ReportDeliveryError,
-    classify_plain_text_stock_intent,
-)
+from mini_hermes.gateway.telegram import MiniHermesBot, ReportDeliveryError
 from mini_hermes.overseas_market import OverseasMarketSnapshot
+from mini_hermes.reporting import GlobalReportBundle
 from mini_hermes.us_market import UsIndexQuote
 
 
 class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_plain_text_routes_coding_to_pi(self) -> None:
+    async def test_plain_text_always_routes_to_pi(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot._run_pi = AsyncMock()
-        bot._run_agent = AsyncMock()
-        bot._reply = AsyncMock()
         update = SimpleNamespace(effective_message=SimpleNamespace(text="hello pi"))
 
         await bot.text_message(update, None)
 
         bot._run_pi.assert_awaited_once_with(update, "hello pi")
-        bot._run_agent.assert_not_awaited()
-
-    async def test_plain_text_routes_stock_code_to_agent(self) -> None:
-        bot = object.__new__(MiniHermesBot)
-        bot._run_pi = AsyncMock()
-        bot._run_agent = AsyncMock()
-        update = SimpleNamespace(effective_message=SimpleNamespace(text="分析 600875"))
-
-        await bot.text_message(update, None)
-
-        bot._run_agent.assert_awaited_once()
-        prompt = bot._run_agent.await_args.args[1]
-        self.assertIn("600875", prompt)
-        bot._run_pi.assert_not_awaited()
-
-    async def test_plain_text_stock_phrase_without_code_hints(self) -> None:
-        bot = object.__new__(MiniHermesBot)
-        bot._run_pi = AsyncMock()
-        bot._run_agent = AsyncMock()
-        bot._authorized = AsyncMock(return_value=True)
-        bot._reply = AsyncMock()
-        update = SimpleNamespace(effective_message=SimpleNamespace(text="看看今日行情"))
-
-        await bot.text_message(update, None)
-
-        bot._reply.assert_awaited_once()
-        self.assertIn("/stock", bot._reply.await_args.args[1])
-        bot._run_pi.assert_not_awaited()
-        bot._run_agent.assert_not_awaited()
-
-    def test_classify_stock_intent_is_conservative(self) -> None:
-        self.assertEqual(classify_plain_text_stock_intent("600875"), ("agent", "600875"))
-        self.assertEqual(
-            classify_plain_text_stock_intent("研究600519"), ("agent", "600519")
-        )
-        self.assertEqual(classify_plain_text_stock_intent("今日行情"), ("hint", None))
-        self.assertEqual(
-            classify_plain_text_stock_intent("refactor the telegram gateway"),
-            ("pi", None),
-        )
-        self.assertEqual(
-            classify_plain_text_stock_intent("fix timeout in port 8080 handler"),
-            ("pi", None),
-        )
 
     async def test_pi_rejects_non_private_chat(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -84,7 +36,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot._reply.assert_awaited_once()
         bot.pi_channel.prompt.assert_not_awaited()
 
-    async def test_global_report_uses_no_agent_or_memory_and_keeps_exact_quotes(self) -> None:
+    async def test_global_report_uses_no_agent_or_memory_and_keeps_compact_quotes(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot.settings = SimpleNamespace(timezone="Asia/Shanghai")
         bot.agent = None
@@ -159,7 +111,8 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
             report = await bot._generate_global_report(snapshot)
 
-        self.assertIn("26,363.4393", report)
+        self.assertIn("美股｜道指 +0.49% · 标普500 -0.17% · 纳指 -0.83%", report)
+        self.assertNotIn("26,363.4393", report)
         bot.memory.append_turn.assert_not_awaited()
         bot.memory.recent_messages.assert_not_awaited()
         bot.memory.list_watch.assert_not_awaited()
@@ -175,8 +128,12 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=snapshot),
             ) as fetch_snapshot,
             patch(
-                "mini_hermes.gateway.telegram.compose_global_report",
-                return_value="overseas report",
+                "mini_hermes.gateway.telegram.compose_global_report_bundle",
+                return_value=GlobalReportBundle(
+                    report_date="2026-08-06",
+                    brief="brief report",
+                    full="overseas report",
+                ),
             ) as compose,
             patch("mini_hermes.gateway.telegram.datetime") as clock,
         ):
@@ -191,13 +148,33 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             report = await bot._generate_global_report()
 
         self.assertEqual(report, "overseas report")
-        fetch_snapshot.assert_awaited_once_with()
+        fetch_snapshot.assert_awaited_once_with(now=clock.now.return_value)
         compose.assert_called_once()
         self.assertEqual(compose.call_args.args[1], snapshot)
         self.assertEqual(
             compose.call_args.kwargs["generated_at"],
             clock.now.return_value,
         )
+
+    async def test_brief_delivery_attaches_full_report_button(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bundle = GlobalReportBundle("2026-08-06", "brief", "full")
+        markup = bot._full_report_markup(bundle)
+        progress = SimpleNamespace(message_id=55, edit_text=AsyncMock())
+
+        message_ids = await bot._deliver_report(
+            SimpleNamespace(send_message=AsyncMock()),
+            99,
+            bundle.brief,
+            progress=progress,
+            reply_markup=markup,
+        )
+
+        self.assertEqual(message_ids, [55])
+        progress.edit_text.assert_awaited_once_with("brief", reply_markup=markup)
+        button = markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, "查看完整数据")
+        self.assertLessEqual(len(button.callback_data), 64)
 
     async def test_deliver_report_reuses_progress_and_returns_all_ids(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -244,9 +221,11 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             timezone="Asia/Shanghai", allowed_user_ids=frozenset({42, 43})
         )
         bot.memory = SimpleNamespace(
-            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)])
+            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)]),
+            save_market_report=AsyncMock(),
         )
-        bot._generate_global_report = AsyncMock(return_value="overseas report")
+        bundle = GlobalReportBundle("2026-08-08", "brief report", "overseas report")
+        bot._generate_global_report_bundle = AsyncMock(return_value=bundle)
         send_message = AsyncMock(
             side_effect=[
                 SimpleNamespace(message_id=123),
@@ -259,10 +238,21 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             clock.now.return_value = datetime(2026, 8, 8, 8, 30)
             await bot.daily_report_job(context)
 
-        bot._generate_global_report.assert_awaited_once_with()
+        bot._generate_global_report_bundle.assert_awaited_once_with()
+        bot.memory.save_market_report.assert_awaited_once_with(
+            "2026-08-08", "overseas report"
+        )
         self.assertEqual(send_message.await_count, 2)
-        send_message.assert_any_await(chat_id=99, text="overseas report")
-        send_message.assert_any_await(chat_id=100, text="overseas report")
+        send_message.assert_any_await(
+            chat_id=99,
+            text="brief report",
+            reply_markup=bot._full_report_markup(bundle),
+        )
+        send_message.assert_any_await(
+            chat_id=100,
+            text="brief report",
+            reply_markup=bot._full_report_markup(bundle),
+        )
 
     async def test_one_delivery_failure_does_not_block_other_subscribers(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -271,9 +261,14 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             timezone="Asia/Shanghai", allowed_user_ids=frozenset({42, 43})
         )
         bot.memory = SimpleNamespace(
-            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)])
+            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)]),
+            save_market_report=AsyncMock(),
         )
-        bot._generate_global_report = AsyncMock(return_value="overseas report")
+        bot._generate_global_report_bundle = AsyncMock(
+            return_value=GlobalReportBundle(
+                "2026-08-04", "brief report", "overseas report"
+            )
+        )
         bot._deliver_report = AsyncMock(
             side_effect=[RuntimeError("Telegram unavailable"), [124]]
         )
@@ -283,8 +278,134 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             clock.now.return_value = datetime(2026, 8, 4, 8, 30)
             await bot.daily_report_job(context)
 
-        bot._generate_global_report.assert_awaited_once_with()
+        bot._generate_global_report_bundle.assert_awaited_once_with()
         self.assertEqual(bot._deliver_report.await_count, 2)
+
+    async def test_full_report_callback_reads_persisted_exact_report(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot.settings = SimpleNamespace(allowed_user_ids=frozenset({42}))
+        full = "full report"
+        bundle = GlobalReportBundle("2026-08-06", "brief", full)
+        callback_data = bot._full_report_markup(bundle).inline_keyboard[0][0].callback_data
+        report_id = callback_data.removeprefix("market_full:")
+        bot.memory = SimpleNamespace(
+            market_report_detail=AsyncMock(return_value=full),
+            touch_user=AsyncMock(),
+        )
+        bot._deliver_report = AsyncMock(return_value=[77])
+        query = SimpleNamespace(
+            data=callback_data,
+            answer=AsyncMock(),
+            message=SimpleNamespace(reply_text=AsyncMock()),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=42, username="tester", first_name="Test"),
+            effective_chat=SimpleNamespace(id=99),
+        )
+        context = SimpleNamespace(bot=object())
+
+        await bot.full_report_callback(update, context)
+
+        query.answer.assert_awaited_once_with()
+        bot.memory.market_report_detail.assert_awaited_once_with(report_id)
+        bot._deliver_report.assert_awaited_once_with(context.bot, 99, full)
+
+    async def test_full_report_callback_rejects_expired_or_unauthorized_data(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot.settings = SimpleNamespace(allowed_user_ids=frozenset({42}))
+        bot.memory = SimpleNamespace(
+            market_report_detail=AsyncMock(return_value="different report"),
+            touch_user=AsyncMock(),
+        )
+        bot._deliver_report = AsyncMock()
+        message = SimpleNamespace(reply_text=AsyncMock())
+        query = SimpleNamespace(
+            data="market_full:00000000000000000000000000000000",
+            answer=AsyncMock(),
+            message=message,
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=42, username="tester", first_name="Test"),
+            effective_chat=SimpleNamespace(id=99),
+        )
+
+        await bot.full_report_callback(update, SimpleNamespace(bot=object()))
+
+        message.reply_text.assert_awaited_once()
+        bot._deliver_report.assert_not_awaited()
+
+        query.answer.reset_mock()
+        message.reply_text.reset_mock()
+        update.effective_user = SimpleNamespace(id=7)
+        await bot.full_report_callback(update, SimpleNamespace(bot=object()))
+        query.answer.assert_awaited_once_with("未授权", show_alert=True)
+        message.reply_text.assert_not_awaited()
+
+    async def test_full_report_callback_explains_storage_and_delivery_failures(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot.settings = SimpleNamespace(allowed_user_ids=frozenset({42}))
+        full = "full report"
+        report_id = sha256(full.encode("utf-8")).hexdigest()[:32]
+        message = SimpleNamespace(reply_text=AsyncMock())
+        query = SimpleNamespace(
+            data=f"market_full:{report_id}",
+            answer=AsyncMock(),
+            message=message,
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=42, username="tester", first_name="Test"),
+            effective_chat=SimpleNamespace(id=99),
+        )
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        bot.memory = SimpleNamespace(
+            market_report_detail=AsyncMock(side_effect=RuntimeError("database unavailable")),
+            touch_user=AsyncMock(),
+        )
+        bot._deliver_report = AsyncMock()
+
+        await bot.full_report_callback(update, context)
+
+        self.assertIn("暂时无法读取", message.reply_text.await_args.args[0])
+        bot._deliver_report.assert_not_awaited()
+
+        message.reply_text.reset_mock()
+        bot.memory.market_report_detail = AsyncMock(return_value=full)
+        bot._deliver_report = AsyncMock(side_effect=RuntimeError("Telegram unavailable"))
+
+        await bot.full_report_callback(update, context)
+
+        self.assertIn("发送失败", message.reply_text.await_args.args[0])
+
+    async def test_weekly_report_runs_only_on_saturday_and_generates_once(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot.settings = SimpleNamespace(
+            timezone="Asia/Shanghai", allowed_user_ids=frozenset({42, 43})
+        )
+        bot.memory = SimpleNamespace(
+            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)])
+        )
+        bot._generate_weekly_report = AsyncMock(return_value="weekly report")
+        bot._deliver_report = AsyncMock(side_effect=[[201], [202]])
+        context = SimpleNamespace(bot=object())
+
+        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+            clock.now.return_value = datetime(2026, 8, 8, 9, 0)
+            await bot.weekly_report_job(context)
+
+        bot._generate_weekly_report.assert_awaited_once_with()
+        self.assertEqual(bot._deliver_report.await_count, 2)
+
+        bot.memory.subscriptions.reset_mock()
+        bot._generate_weekly_report.reset_mock()
+        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+            clock.now.return_value = datetime(2026, 8, 9, 9, 0)
+            await bot.weekly_report_job(context)
+
+        bot.memory.subscriptions.assert_not_awaited()
+        bot._generate_weekly_report.assert_not_awaited()
 
     async def test_daily_report_skips_generation_without_allowed_recipients(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -295,14 +416,14 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot.memory = SimpleNamespace(
             subscriptions=AsyncMock(return_value=[(99, 100)])
         )
-        bot._generate_global_report = AsyncMock()
+        bot._generate_global_report_bundle = AsyncMock()
         context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
 
         with patch("mini_hermes.gateway.telegram.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 4, 8, 30)
             await bot.daily_report_job(context)
 
-        bot._generate_global_report.assert_not_awaited()
+        bot._generate_global_report_bundle.assert_not_awaited()
         context.bot.send_message.assert_not_awaited()
 
     async def test_daily_report_skips_days_without_recent_us_close(self) -> None:
