@@ -15,7 +15,7 @@ Environment=PI_CODING_AGENT_DIR=/var/lib/mini-hermes-pi/agent
 Environment=PI_CHANNEL_SOCKET=/run/mini-hermes-pi/pi.sock
 Environment=PI_CHANNEL_STATE_DIR=/var/lib/mini-hermes-pi
 Environment=PI_CHANNEL_WORKSPACE=/opt/mini-hermes/workspace
-Environment=PI_CHANNEL_MODEL=xai/grok-4.5
+Environment=PI_CHANNEL_MODEL=xai/grok-4.6
 Environment=PI_CHANNEL_THINKING=low
 Environment=PI_CHANNEL_TIMEOUT_SECONDS=600
 ExecStart=/opt/mini-hermes/.venv/bin/python -m mini_hermes.pi_channel.broker
