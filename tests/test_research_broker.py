@@ -102,8 +102,9 @@ class ResearchBrokerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_credentials_or_options_can_be_added_to_request(self):
         for name in ['apiKey', 'headers', 'baseUrl', 'env', 'model', 'samplingParams']:
-            with self.subTest(name=name), self.assertRaisesRegex(PiChannelError, 'invalid research request'):
+            with self.subTest(name=name), self.assertRaises(PiChannelError) as caught:
                 await self.client.research_completion({**self.payload, name: 'ignored'})
+            self.assertEqual(caught.exception.code, 'invalid_request')
         self.assertFalse(self.spawn_args)
 
     async def test_model_mismatch_fails_without_fallback_or_subprocess(self):
@@ -118,7 +119,7 @@ class ResearchBrokerTests(unittest.IsolatedAsyncioTestCase):
             await self.client.research_completion(self.payload)
         self.assertNotIn('TEST_SECRET', str(caught.exception))
         self.assertNotIn('unexpected-secret', str(caught.exception))
-        self.assertIn('Grok 服务暂时不可用', str(caught.exception))
+        self.assertEqual(caught.exception.code, 'upstream_error')
 
     async def test_auth_failure_is_actionable(self):
         self.child_output = {'ok': False, 'error_code': 'auth_required'}
@@ -130,8 +131,9 @@ class ResearchBrokerTests(unittest.IsolatedAsyncioTestCase):
         sentinel = object()
         self.broker._process = sentinel
         with patch('mini_hermes.pi_channel.broker.RESEARCH_TIMEOUT_SECONDS', 0.08):
-            with self.assertRaisesRegex(PiChannelError, '研究请求超时'):
+            with self.assertRaises(PiChannelError) as caught:
                 await self.client.research_completion(self.payload)
+            self.assertEqual(caught.exception.code, 'timeout')
         self.assertIs(self.broker._process, sentinel)
         self.assertTrue(self.children)
         self.assertIsNotNone(self.children[0].returncode)
@@ -159,14 +161,16 @@ class ResearchBrokerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_response_size_limit_terminates_child(self):
         self.child_large = True
-        with self.assertRaisesRegex(PiChannelError, 'Grok 服务暂时不可用'):
+        with self.assertRaises(PiChannelError) as caught:
             await self.client.research_completion(self.payload)
+        self.assertEqual(caught.exception.code, 'upstream_error')
         self.assertIsNotNone(self.children[0].returncode)
 
     async def test_request_size_limit_is_checked_before_connecting(self):
         with patch.object(self.client, '_connect', new_callable=AsyncMock) as connect:
-            with self.assertRaisesRegex(PiChannelError, 'size limit'):
+            with self.assertRaises(PiChannelError) as caught:
                 await self.client.research_completion({'systemPrompt': 'x' * MAX_MESSAGE_BYTES})
+            self.assertEqual(caught.exception.code, 'invalid_request')
         connect.assert_not_called()
 
     async def test_final_envelope_cannot_exceed_response_limit(self):

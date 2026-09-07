@@ -12,20 +12,18 @@ import struct
 import uuid
 
 from mini_hermes.pi_channel.client import MAX_MESSAGE_BYTES
+from mini_hermes.pi_channel.errors import classify_pi_failure, error_message, normalize_error_code
 
 
 LOGGER = logging.getLogger(__name__)
 RESEARCH_TIMEOUT_SECONDS = 120
 
 RESEARCH_ERRORS = {
-    "auth_required": "Grok 账号授权不可用，请重新授权后重试",
-    "quota": "Grok 账号额度不足，请检查订阅状态",
-    "rate_limited": "Grok 请求限流，请稍后重试",
-    "timeout": "Grok 研究请求超时，请缩小范围后重试",
-    "invalid_request": "Grok 研究请求格式不受支持",
-    "model_unavailable": "Grok 4.6 研究模型配置不一致",
-    "output_limit": "Grok 输出达到长度限制，请缩小研究范围",
-    "upstream_error": "Grok 服务暂时不可用，请稍后重试",
+    code: error_message(code)
+    for code in (
+        "auth_required", "quota", "rate_limited", "timeout", "invalid_request",
+        "model_unavailable", "output_limit", "upstream_error",
+    )
 }
 
 
@@ -66,6 +64,7 @@ class PiChannelBroker:
         self._lock = asyncio.Lock()
         self._process: asyncio.subprocess.Process | None = None
         self._active_user_id: int | None = None
+        self._cancel_requested = False
         self._research_slots = asyncio.Semaphore(1)
         self._research_processes: set[asyncio.subprocess.Process] = set()
 
@@ -90,7 +89,10 @@ class PiChannelBroker:
         try:
             await asyncio.wait_for(process.wait(), timeout=3)
         except TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
             await process.wait()
 
     async def _research_exchange(
@@ -178,7 +180,7 @@ class PiChannelBroker:
                     task.cancel()
             await asyncio.gather(*(task for task in (exchange, disconnected) if task is not None), return_exceptions=True)
         LOGGER.warning("research_completion_failed code=%s", error_code)
-        await self._send(writer, {"type": "result", "ok": False, "error": RESEARCH_ERRORS[error_code]})
+        await self._send_failure(writer, error_code)
 
     def _prepare_paths(self) -> None:
         group_id = grp.getgrnam("mini-hermes").gr_gid
@@ -216,17 +218,32 @@ class PiChannelBroker:
         writer.write((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
         await writer.drain()
 
+    async def _send_failure(self, writer: asyncio.StreamWriter, code: object) -> None:
+        normalized = normalize_error_code(code)
+        await self._send(
+            writer,
+            {"type": "result", "ok": False, "error_code": normalized, "error": error_message(normalized)},
+        )
+
     async def _stop_process(self) -> None:
         process = self._process
         if process is None or process.returncode is not None:
             self._process = None
             self._active_user_id = None
             return
-        process.terminate()
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            self._process = None
+            self._active_user_id = None
+            return
         try:
             await asyncio.wait_for(process.wait(), timeout=3)
         except TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
             await process.wait()
         self._process = None
         self._active_user_id = None
@@ -276,11 +293,25 @@ class PiChannelBroker:
         )
         self._process = process
         self._active_user_id = user_id
+        self._cancel_requested = False
         assert process.stdout is not None and process.stderr is not None
         stderr_task = asyncio.create_task(self._drain_stderr(process.stderr))
-        answer = ""
+        latest_assistant: dict[str, object] | None = None
+        event_failure = ""
         tools_seen: set[str] = set()
         completed = False
+        timed_out = False
+        stderr = ""
+        exit_code = None
+
+        def observe_assistant(candidate: object) -> None:
+            nonlocal latest_assistant, event_failure
+            if isinstance(candidate, dict) and candidate.get("role") == "assistant":
+                latest_assistant = candidate
+                # A successful retry must not inherit the previous attempt's error.
+                if candidate.get("stopReason") == "stop" and not candidate.get("errorMessage"):
+                    event_failure = ""
+
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 while True:
@@ -291,8 +322,13 @@ class PiChannelBroker:
                         event = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
                     event_type = event.get("type")
+                    if event_type in {"turn_start", "message_start", "auto_retry_start"}:
+                        completed = False
                     if event_type == "tool_execution_start":
+                        completed = False
                         tool_name = _tool_name(event)
                         if tool_name not in tools_seen:
                             tools_seen.add(tool_name)
@@ -301,34 +337,67 @@ class PiChannelBroker:
                                 {"type": "progress", "text": f"正在调用工具：{tool_name}"},
                             )
                     elif event_type in {"message_end", "turn_end"}:
-                        candidate = _message_text(event.get("message"))
-                        if candidate:
-                            answer = candidate
+                        observe_assistant(event.get("message"))
                     elif event_type == "agent_end":
                         messages = event.get("messages", [])
                         if isinstance(messages, list):
                             for item in reversed(messages):
-                                candidate = _message_text(item)
-                                if candidate:
-                                    answer = candidate
+                                if isinstance(item, dict) and item.get("role") == "assistant":
+                                    observe_assistant(item)
                                     break
+                        # agent_end may precede native retries/compaction. Do not
+                        # terminate pi here: consume through settled/clean EOF.
+                        completed = event.get("willRetry") is not True
+                    elif event_type == "agent_settled":
                         completed = True
-                        break
+                    elif event_type == "auto_retry_end":
+                        final_error = event.get("finalError")
+                        if isinstance(final_error, str) and final_error:
+                            event_failure = final_error[-32768:]
+                        elif event.get("success") is True:
+                            event_failure = ""
+                    elif event_type in {"error", "fatal_error"}:
+                        failure = event.get("error") or event.get("message")
+                        if isinstance(failure, str):
+                            event_failure = failure[-32768:]
+                await process.wait()
+                exit_code = process.returncode
         except TimeoutError:
-            await self._stop_process()
-            await self._send(
-                writer,
-                {
-                    "type": "result",
-                    "ok": False,
-                    "error": f"pi request timed out after {self.timeout_seconds}s",
-                },
-            )
-            return
+            timed_out = True
         finally:
-            await self._stop_process()
-        stderr = await stderr_task
-        if completed and answer:
+            try:
+                await self._stop_process()
+            finally:
+                try:
+                    stderr = await asyncio.wait_for(stderr_task, timeout=3)
+                except TimeoutError:
+                    stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+        latest = latest_assistant or {}
+        stop_reason = latest.get("stopReason", "")
+        stop_reason = stop_reason if isinstance(stop_reason, str) else ""
+        native_error = latest.get("errorMessage", "")
+        native_error = native_error if isinstance(native_error, str) else ""
+        content = latest.get("content", [])
+        has_tool_calls = isinstance(content, list) and any(
+            isinstance(item, dict) and item.get("type") == "toolCall" for item in content
+        )
+        answer = _message_text(latest)
+        if self._cancel_requested:
+            code = "cancelled"
+        elif timed_out:
+            code = "timeout"
+        elif event_failure and classify_pi_failure(event_failure) == "cancelled":
+            code = "cancelled"
+        elif native_error or stop_reason in {"error", "aborted", "length"}:
+            code = classify_pi_failure(native_error, stop_reason, exit_code)
+            if code == "upstream_error" and not native_error:
+                code = classify_pi_failure(event_failure or stderr, stop_reason, exit_code)
+        elif event_failure:
+            code = classify_pi_failure(event_failure, exit_code=exit_code)
+        elif exit_code not in {None, 0}:
+            code = classify_pi_failure(stderr, exit_code=exit_code)
+        elif completed and answer and stop_reason in {"", "stop"} and not has_tool_calls:
             await self._send(
                 writer,
                 {
@@ -340,8 +409,10 @@ class PiChannelBroker:
                 },
             )
             return
-        error = stderr.strip() or "pi ended without a final answer"
-        await self._send(writer, {"type": "result", "ok": False, "error": error[-2000:]})
+        else:
+            code = classify_pi_failure(stderr, exit_code=exit_code)
+        LOGGER.warning("pi_completion_failed code=%s", code)
+        await self._send_failure(writer, code)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -375,6 +446,8 @@ class PiChannelBroker:
                 raise ValueError("invalid user_id")
             if action == "abort":
                 aborted = self._process is not None and self._process.returncode is None
+                if aborted:
+                    self._cancel_requested = True
                 await self._stop_process()
                 await self._send(writer, {"type": "result", "ok": True, "aborted": aborted})
                 return
@@ -394,14 +467,22 @@ class PiChannelBroker:
                 if len(message) > 50000:
                     raise ValueError("prompt is too long")
                 await self._run_prompt(user_id, message, writer)
-        except (ValueError, json.JSONDecodeError, TimeoutError) as exc:
-            await self._send(writer, {"type": "result", "ok": False, "error": str(exc)})
+        except (ValueError, json.JSONDecodeError):
+            await self._send_failure(writer, "invalid_request")
+        except TimeoutError:
+            await self._send_failure(writer, "timeout")
         except (BrokenPipeError, ConnectionResetError):
             LOGGER.info("pi_channel_client_disconnected")
-        except Exception as exc:  # noqa: BLE001 - broker must keep accepting requests
-            LOGGER.exception("pi_channel_request_failed")
+        except OSError:
+            LOGGER.warning("pi_channel_request_failed code=channel_unavailable")
             try:
-                await self._send(writer, {"type": "result", "ok": False, "error": str(exc)})
+                await self._send_failure(writer, "channel_unavailable")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        except Exception:  # noqa: BLE001 - broker must keep accepting requests
+            LOGGER.warning("pi_channel_request_failed code=upstream_error")
+            try:
+                await self._send_failure(writer, "upstream_error")
             except (BrokenPipeError, ConnectionResetError):
                 pass
         finally:

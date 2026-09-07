@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 import logging
 import time
+import uuid
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,7 @@ from mini_hermes.gateway.telegram.routing import FULL_REPORT_CALLBACK
 from mini_hermes.memory import MemoryStore
 from mini_hermes.overseas_market import OverseasMarketSnapshot, fetch_overseas_snapshot
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
+from mini_hermes.pi_channel.errors import error_message
 from mini_hermes.reporting import (
     GlobalReportBundle,
     compose_global_report_bundle,
@@ -368,27 +370,48 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
             try:
                 await progress.edit_text(display)
             except Exception:  # noqa: BLE001 - progress updates are best effort
-                LOGGER.debug("pi_progress_edit_failed", exc_info=True)
+                LOGGER.debug("pi_progress_edit_failed")
 
-        LOGGER.info("pi_request_started user_id=%s prompt_chars=%s", user.id, len(prompt))
-        await self.application.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
-        try:
-            response = await self.pi_channel.prompt(user.id, prompt, on_progress)
-            if not response:
-                response = "pi 已完成，但没有返回可显示文本。"
-            await self.memory.append_turn(user.id, prompt, response, channel="pi")
-        except PiChannelError as exc:
-            LOGGER.warning("pi_request_failed user_id=%s error=%s", user.id, exc)
-            response = f"pi channel 暂时不可用：{exc}"
-        except Exception:  # noqa: BLE001 - keep Telegram handler alive
-            LOGGER.exception("pi_request_failed user_id=%s", user.id)
-            response = "pi channel 发生异常，请使用 /pistatus 检查。"
+        request_id = uuid.uuid4().hex
+        outcome, error_code, response = "failed", "upstream_error", ""
         LOGGER.info(
-            "pi_request_finished user_id=%s seconds=%.2f response_chars=%s",
-            user.id,
-            time.monotonic() - started,
-            len(response),
+            "pi_request_started request_id=%s user_id=%s prompt_chars=%s",
+            request_id, user.id, len(prompt),
         )
+        try:
+            try:
+                await self.application.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            except Exception:  # typing status must not prevent the actual request
+                LOGGER.debug("pi_typing_status_unavailable request_id=%s", request_id)
+            response = await self.pi_channel.prompt(user.id, prompt, on_progress)
+            if not isinstance(response, str) or not response.strip():
+                raise PiChannelError(code="invalid_response")
+            outcome, error_code = "success", "none"
+            try:
+                await self.memory.append_turn(user.id, prompt, response, channel="pi")
+            except Exception:  # keep a successful answer available if memory fails
+                LOGGER.warning("pi_memory_write_failed request_id=%s", request_id)
+        except asyncio.CancelledError:
+            outcome, error_code = "cancelled", "cancelled"
+            raise
+        except PiChannelError as exc:
+            error_code = exc.code
+            outcome = "cancelled" if error_code == "cancelled" else "failed"
+            response = error_message(error_code)
+        except Exception:  # provider diagnostics must not leak into logs or chat
+            response = error_message(error_code)
+        finally:
+            if outcome == "failed":
+                LOGGER.warning(
+                    "pi_request_failed request_id=%s user_id=%s error_code=%s",
+                    request_id, user.id, error_code,
+                )
+            LOGGER.info(
+                "pi_request_finished request_id=%s user_id=%s outcome=%s "
+                "error_code=%s seconds=%.2f response_chars=%s",
+                request_id, user.id, outcome, error_code,
+                time.monotonic() - started, len(response),
+            )
         await self._finish_progress(update, progress, response)
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

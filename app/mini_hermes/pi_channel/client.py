@@ -5,13 +5,16 @@ import json
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .errors import classify_pi_failure, error_message, normalize_error_code
 
 ProgressCallback = Callable[[str], Awaitable[None]]
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 class PiChannelError(RuntimeError):
-    pass
+    def __init__(self, message: str = "", *, code: str = "upstream_error") -> None:
+        self.code = normalize_error_code(code)
+        super().__init__(message or error_message(self.code))
 
 
 class PiChannelClient:
@@ -24,8 +27,8 @@ class PiChannelClient:
             return await asyncio.open_unix_connection(
                 self.socket_path, limit=MAX_MESSAGE_BYTES + 1
             )
-        except (FileNotFoundError, ConnectionRefusedError, PermissionError) as exc:
-            raise PiChannelError(f"pi channel unavailable: {exc}") from exc
+        except OSError as exc:
+            raise PiChannelError(code="channel_unavailable") from exc
 
     async def _request(
         self,
@@ -34,7 +37,7 @@ class PiChannelClient:
     ) -> dict[str, object]:
         encoded = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
-            raise PiChannelError("pi request exceeds the size limit")
+            raise PiChannelError(code="invalid_request")
         reader, writer = await self._connect()
         try:
             async with asyncio.timeout(self.timeout_seconds):
@@ -43,26 +46,40 @@ class PiChannelClient:
                 while True:
                     raw = await reader.readline()
                     if not raw:
-                        raise PiChannelError("pi channel closed before returning a result")
+                        raise PiChannelError(code="channel_unavailable")
                     if len(raw) > MAX_MESSAGE_BYTES:
-                        raise PiChannelError("pi response exceeds the size limit")
+                        raise PiChannelError(code="invalid_response")
                     event = json.loads(raw)
+                    if not isinstance(event, dict):
+                        raise PiChannelError(code="invalid_response")
                     if event.get("type") == "progress":
                         if on_progress is not None:
                             await on_progress(str(event.get("text", "pi is working")))
                         continue
                     if event.get("type") != "result":
                         continue
-                    if not event.get("ok"):
-                        raise PiChannelError(str(event.get("error", "pi channel failed")))
+                    if event.get("ok") is not True:
+                        # Older brokers may not supply a code; never echo their raw
+                        # diagnostics, which can contain provider URLs or secrets.
+                        code = (
+                            normalize_error_code(event["error_code"])
+                            if "error_code" in event
+                            else classify_pi_failure(str(event.get("error", "")))
+                        )
+                        raise PiChannelError(code=code)
                     return event
         except TimeoutError as exc:
-            raise PiChannelError(f"pi channel timed out after {self.timeout_seconds}s") from exc
+            raise PiChannelError(code="timeout") from exc
         except ValueError as exc:
-            raise PiChannelError("pi channel returned malformed or oversized data") from exc
+            raise PiChannelError(code="invalid_response") from exc
+        except (ConnectionError, OSError) as exc:
+            raise PiChannelError(code="channel_unavailable") from exc
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
     async def prompt(
         self,
@@ -74,7 +91,10 @@ class PiChannelClient:
             {"action": "prompt", "user_id": user_id, "message": message},
             on_progress,
         )
-        return str(result.get("text", ""))
+        text = result.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise PiChannelError(code="invalid_response")
+        return text
 
     async def new_session(self, user_id: int) -> str:
         result = await self._request({"action": "new", "user_id": user_id})
@@ -92,5 +112,5 @@ class PiChannelClient:
         result = await self._request({"action": "research_completion", "request": payload})
         message = result.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
-            raise PiChannelError("research model returned an invalid response")
+            raise PiChannelError(code="invalid_response")
         return message
