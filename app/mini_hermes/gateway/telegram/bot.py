@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import re
 import time
 import uuid
 from typing import Awaitable, Callable
@@ -26,6 +27,7 @@ from mini_hermes.gateway.telegram.delivery import DeliveryMixin, ReportDeliveryE
 from mini_hermes.gateway.telegram.errors import log_handler_error
 from mini_hermes.gateway.telegram.jobs import JobsMixin
 from mini_hermes.gateway.telegram.routing import FULL_REPORT_CALLBACK
+from mini_hermes.gateway.telegram.signal_gate_review_forward import signal_gate_review_callback
 from mini_hermes.memory import MemoryStore
 from mini_hermes.overseas_market import OverseasMarketSnapshot, fetch_overseas_snapshot
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
@@ -115,6 +117,12 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
             CallbackQueryHandler(
                 self.full_report_callback,
                 pattern=FULL_REPORT_CALLBACK,
+            )
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(
+                signal_gate_review_callback,
+                pattern=re.compile(r"^sg:(ok|no):\d+$"),
             )
         )
         self.application.add_handler(
