@@ -32,7 +32,7 @@ LockPersonality=true
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/opt/mini-hermes/data /var/log/mini-hermes
-MemoryMax=1200M
+MemoryMax=600M
 TasksMax=96
 
 [Install]

@@ -60,6 +60,11 @@ class MemoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await self.store.market_report_detail("invalid"))
 
+    async def test_busy_timeout_pragma(self) -> None:
+        row = self.store._db().execute("PRAGMA busy_timeout").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(int(row[0]), 5000)
+
     async def test_empty_market_report_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             await self.store.save_market_report("2026-08-29", "   ")

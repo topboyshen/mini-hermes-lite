@@ -58,3 +58,26 @@ PYTHONPATH=/opt/mini-hermes/app .venv/bin/python -m mini_hermes --self-test
 systemctl status mini-hermes --no-pager
 journalctl -u mini-hermes -n 100 --no-pager
 ```
+
+## 更新代码后重启（必做闸门）
+
+在 `systemctl restart` **之前**于 `/opt/mini-hermes` 执行：
+
+```bash
+./deploy/pre-restart-gate.sh
+# 无 .env 的环境（如纯 CI）可：
+# ./deploy/pre-restart-gate.sh --skip-self-test
+systemctl restart mini-hermes-pi mini-hermes
+```
+
+闸门顺序：`compileall` → `pytest` → `--self-test`（有 `.env` 时）。任一步失败则不要重启。
+
+## 内存上限（1.9Gi 主机）
+
+unit 默认 `MemoryMax`：`mini-hermes` **600M**，`mini-hermes-pi` **700M**，为 nginx 等其它进程留余量。改 unit 后需：
+
+```bash
+cp deploy/*.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl restart mini-hermes-pi mini-hermes
+```
