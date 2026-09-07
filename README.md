@@ -20,6 +20,8 @@ agent；A 股命令由 PydanticAI 调用 `quanters-akshare-mcp` 完成，海外�
 ### Telegram 单通道
 
 - 普通私聊消息：直接进入持续的 pi 会话，无需切换模式
+- 纯文本若含明确 6 位 A 股代码（如 `600875` 或 `分析 600875`），会自动改走 Mini Hermes 个股研究；含“今日行情/A股”等短语但无代码时，会提示改用 `/stock` 或 `/market`，避免误进 pi
+- pi 与 Hermes 的短期对话记忆按 channel 隔离，互不污染
 - `/new`：新建空白 pi 会话
 - `/abort`：中止当前 pi 任务
 - `/pistatus`：查看 channel 模型和忙碌状态

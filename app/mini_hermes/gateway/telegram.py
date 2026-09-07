@@ -30,6 +30,44 @@ from mini_hermes.scheduler import parse_daily_time
 
 LOGGER = logging.getLogger(__name__)
 STOCK_CODE = re.compile(r"^[0-9]{6}$")
+_STOCK_CODE_IN_TEXT = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+_STOCK_ACTION = re.compile(r"(看|分析|研究)")
+_STRONG_ASHARE = re.compile(
+    r"(A\s*股|沪深|上证|深证|创业板|科创板|北交所|大盘走势|市场概览|今日行情|个股研究)"
+)
+
+
+def classify_plain_text_stock_intent(text: str) -> tuple[str, str | None]:
+    """Conservative plain-text stock router for the single Telegram channel.
+
+    Returns:
+      ("agent", code) — auto-route to Mini Hermes A-share agent
+      ("hint", None) — ambiguous A-share phrase without a code
+      ("pi", None) — default coding / general pi path
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ("pi", None)
+    if STOCK_CODE.fullmatch(stripped):
+        return ("agent", stripped)
+
+    code_match = _STOCK_CODE_IN_TEXT.search(stripped)
+    if code_match and _STOCK_ACTION.search(stripped):
+        return ("agent", code_match.group(1))
+
+    if code_match:
+        # Short messages where a 6-digit token is the clear subject (e.g. "600875 怎么样")
+        tokens = re.findall(r"\S+", stripped)
+        cleaned = [token.strip(".,!?;:，。！？、") for token in tokens]
+        code_tokens = [token for token in cleaned if STOCK_CODE.fullmatch(token)]
+        if code_tokens and len(cleaned) <= 4:
+            return ("agent", code_tokens[0])
+
+    if _STRONG_ASHARE.search(stripped) and code_match is None:
+        return ("hint", None)
+    return ("pi", None)
+
+
 
 
 class ReportDeliveryError(RuntimeError):
@@ -340,7 +378,7 @@ class MiniHermesBot:
             response = await self.pi_channel.prompt(user.id, prompt, on_progress)
             if not response:
                 response = "pi 已完成，但没有返回可显示文本。"
-            await self.memory.append_turn(user.id, prompt, response)
+            await self.memory.append_turn(user.id, prompt, response, channel="pi")
         except PiChannelError as exc:
             LOGGER.warning("pi_request_failed user_id=%s error=%s", user.id, exc)
             response = f"pi channel 暂时不可用：{exc}"
@@ -542,6 +580,7 @@ class MiniHermesBot:
             update,
             "Mini Hermes Lite v0.1\n"
             f"CPU: {status['cpu']}\nRAM: {status['ram']}\n磁盘: {status['disk']}\n"
+            f"US feed: {status['us_feed']}\n"
             f"MCP: {'ready' if mcp_ready else 'waiting for model key'} ({toolset_count} server)\n"
             f"API: {'configured' if api_ready else 'missing key'}\n"
             f"Memory: {stats['users']} user / {stats['conversations']} message",
@@ -549,8 +588,27 @@ class MiniHermesBot:
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
-        if message is not None and message.text:
-            await self._run_pi(update, message.text)
+        if message is None or not message.text:
+            return
+        text = message.text
+        kind, code = classify_plain_text_stock_intent(text)
+        if kind == "agent" and code is not None:
+            await self._run_agent(
+                update,
+                f"分析 A 股 {code}。必须调用 AKShare MCP 获取尽可能新的行情数据，"
+                "并按行情、趋势、催化、风险、观察点输出。",
+            )
+            return
+        if kind == "hint":
+            if not await self._authorized(update):
+                return
+            await self._reply(
+                update,
+                "看起来像 A 股相关问题。请使用 /stock <6位代码> 做个股研究，"
+                "或 /market 看市场概览；普通编程/工具问题可直接发消息给 pi。",
+            )
+            return
+        await self._run_pi(update, text)
 
     async def daily_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = datetime.now(ZoneInfo(self.settings.timezone))

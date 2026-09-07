@@ -4,20 +4,70 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from mini_hermes.gateway.telegram import MiniHermesBot, ReportDeliveryError
+from mini_hermes.gateway.telegram import (
+    MiniHermesBot,
+    ReportDeliveryError,
+    classify_plain_text_stock_intent,
+)
 from mini_hermes.overseas_market import OverseasMarketSnapshot
 from mini_hermes.us_market import UsIndexQuote
 
 
 class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_plain_text_always_routes_to_pi(self) -> None:
+    async def test_plain_text_routes_coding_to_pi(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot._run_pi = AsyncMock()
+        bot._run_agent = AsyncMock()
+        bot._reply = AsyncMock()
         update = SimpleNamespace(effective_message=SimpleNamespace(text="hello pi"))
 
         await bot.text_message(update, None)
 
         bot._run_pi.assert_awaited_once_with(update, "hello pi")
+        bot._run_agent.assert_not_awaited()
+
+    async def test_plain_text_routes_stock_code_to_agent(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot._run_pi = AsyncMock()
+        bot._run_agent = AsyncMock()
+        update = SimpleNamespace(effective_message=SimpleNamespace(text="分析 600875"))
+
+        await bot.text_message(update, None)
+
+        bot._run_agent.assert_awaited_once()
+        prompt = bot._run_agent.await_args.args[1]
+        self.assertIn("600875", prompt)
+        bot._run_pi.assert_not_awaited()
+
+    async def test_plain_text_stock_phrase_without_code_hints(self) -> None:
+        bot = object.__new__(MiniHermesBot)
+        bot._run_pi = AsyncMock()
+        bot._run_agent = AsyncMock()
+        bot._authorized = AsyncMock(return_value=True)
+        bot._reply = AsyncMock()
+        update = SimpleNamespace(effective_message=SimpleNamespace(text="看看今日行情"))
+
+        await bot.text_message(update, None)
+
+        bot._reply.assert_awaited_once()
+        self.assertIn("/stock", bot._reply.await_args.args[1])
+        bot._run_pi.assert_not_awaited()
+        bot._run_agent.assert_not_awaited()
+
+    def test_classify_stock_intent_is_conservative(self) -> None:
+        self.assertEqual(classify_plain_text_stock_intent("600875"), ("agent", "600875"))
+        self.assertEqual(
+            classify_plain_text_stock_intent("研究600519"), ("agent", "600519")
+        )
+        self.assertEqual(classify_plain_text_stock_intent("今日行情"), ("hint", None))
+        self.assertEqual(
+            classify_plain_text_stock_intent("refactor the telegram gateway"),
+            ("pi", None),
+        )
+        self.assertEqual(
+            classify_plain_text_stock_intent("fix timeout in port 8080 handler"),
+            ("pi", None),
+        )
 
     async def test_pi_rejects_non_private_chat(self) -> None:
         bot = object.__new__(MiniHermesBot)

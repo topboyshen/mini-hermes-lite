@@ -45,11 +45,14 @@ class MemoryStore:
                 user_id INTEGER NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
                 content TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT 'hermes',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_conversations_user_id
                 ON conversations(user_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_conversations_user_channel
+                ON conversations(user_id, channel, id DESC);
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -59,7 +62,19 @@ class MemoryStore:
             );
             """
         )
+        self._migrate_conversation_channel()
         self._connection.commit()
+
+    def _migrate_conversation_channel(self) -> None:
+        """Add channel column to pre-existing SQLite DBs; default existing rows to hermes."""
+        columns = {
+            str(row[1])
+            for row in self._db().execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        if "channel" not in columns:
+            self._db().execute(
+                "ALTER TABLE conversations ADD COLUMN channel TEXT NOT NULL DEFAULT 'hermes'"
+            )
 
     def _db(self) -> sqlite3.Connection:
         if self._connection is None:
@@ -146,31 +161,49 @@ class MemoryStore:
                 return None
             return int(row["last_chat_id"])
 
-    async def recent_messages(self, user_id: int, limit: int) -> list[tuple[str, str]]:
+    async def recent_messages(
+        self, user_id: int, limit: int, *, channel: str = "hermes"
+    ) -> list[tuple[str, str]]:
         async with self._lock:
             rows = self._db().execute(
-                "SELECT role, content FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT ?",
-                (user_id, limit),
+                """
+                SELECT role, content FROM conversations
+                WHERE user_id=? AND channel=?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (user_id, channel, limit),
             ).fetchall()
             return [(str(row["role"]), str(row["content"])) for row in reversed(rows)]
 
-    async def append_turn(self, user_id: int, user_text: str, assistant_text: str) -> None:
+    async def append_turn(
+        self,
+        user_id: int,
+        user_text: str,
+        assistant_text: str,
+        *,
+        channel: str = "hermes",
+    ) -> None:
         timestamp = _now()
         async with self._lock:
             self._db().executemany(
-                "INSERT INTO conversations(user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                """
+                INSERT INTO conversations(user_id, role, content, channel, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
                 [
-                    (user_id, "user", user_text, timestamp),
-                    (user_id, "assistant", assistant_text, timestamp),
+                    (user_id, "user", user_text, channel, timestamp),
+                    (user_id, "assistant", assistant_text, channel, timestamp),
                 ],
             )
             self._db().execute(
                 """
-                DELETE FROM conversations WHERE user_id=? AND id NOT IN (
-                    SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 100
+                DELETE FROM conversations WHERE user_id=? AND channel=? AND id NOT IN (
+                    SELECT id FROM conversations
+                    WHERE user_id=? AND channel=?
+                    ORDER BY id DESC LIMIT 100
                 )
                 """,
-                (user_id, user_id),
+                (user_id, channel, user_id, channel),
             )
             self._db().commit()
 

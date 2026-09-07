@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import logging
 import re
+import threading
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,10 @@ _SINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _MARKET_TIMEZONE = ZoneInfo("America/New_York")
 _AS_OF_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+_feed_lock = threading.Lock()
+_consecutive_failures = 0
+_last_error: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class UsIndexQuote:
@@ -41,6 +46,37 @@ class UsIndexQuote:
     @property
     def trade_date(self) -> date:
         return self.observed_at.date()
+
+
+def us_market_feed_status() -> dict[str, object]:
+    """Expose consecutive Sina fetch/parse failures for /status."""
+    with _feed_lock:
+        return {
+            "consecutive_failures": _consecutive_failures,
+            "last_error": _last_error,
+            "ok": _consecutive_failures == 0,
+        }
+
+
+def _reset_feed_status_for_tests() -> None:
+    global _consecutive_failures, _last_error
+    with _feed_lock:
+        _consecutive_failures = 0
+        _last_error = None
+
+
+def _record_feed_success() -> None:
+    global _consecutive_failures, _last_error
+    with _feed_lock:
+        _consecutive_failures = 0
+        _last_error = None
+
+
+def _record_feed_failure(error: str) -> None:
+    global _consecutive_failures, _last_error
+    with _feed_lock:
+        _consecutive_failures += 1
+        _last_error = error
 
 
 def _market_timestamp(as_of: str) -> datetime:
@@ -93,11 +129,15 @@ async def fetch_us_quotes() -> tuple[UsIndexQuote, ...]:
             raw = response.content.decode("gbk", errors="replace")
     except Exception as exc:  # noqa: BLE001 - degrade to a clear no-data state
         LOGGER.warning("us_quotes_fetch_failed error=%s", exc)
+        _record_feed_failure(f"fetch:{exc}")
         return ()
 
     quotes = parse_us_quotes(raw)
     if not quotes:
         LOGGER.warning("us_quotes_parse_empty")
+        _record_feed_failure("parse_empty")
+        return ()
+    _record_feed_success()
     return quotes
 
 

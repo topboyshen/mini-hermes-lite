@@ -93,7 +93,7 @@ class AgentService:
         if not self._started:
             raise RuntimeError("Agent is not started")
         history = await self.memory.recent_messages(
-            user_id, self.settings.max_history_messages
+            user_id, self.settings.max_history_messages, channel="hermes"
         )
         watchlist = await self.memory.list_watch(user_id)
         style = await self.memory.get_style(user_id)
@@ -116,5 +116,5 @@ class AgentService:
                 timeout=self.settings.agent_timeout_seconds,
             )
         output = str(result.output).strip()
-        await self.memory.append_turn(user_id, prompt, output)
+        await self.memory.append_turn(user_id, prompt, output, channel="hermes")
         return output

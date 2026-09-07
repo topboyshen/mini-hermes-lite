@@ -1,9 +1,14 @@
 import unittest
 from datetime import date
 
+from unittest.mock import AsyncMock, patch
+
 from mini_hermes.us_market import (
+    _reset_feed_status_for_tests,
+    fetch_us_quotes,
     parse_us_quotes,
     render_us_index_block,
+    us_market_feed_status,
 )
 
 
@@ -64,6 +69,65 @@ class UsMarketTests(unittest.TestCase):
         self.assertNotIn("26336.4393", rendered)
         self.assertIn("-221.5537", rendered)
         self.assertIn("-0.83%", rendered)
+
+
+
+class UsMarketFeedStatusTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        _reset_feed_status_for_tests()
+
+    async def test_fetch_failure_increments_and_success_resets(self) -> None:
+        with patch("mini_hermes.us_market.httpx.AsyncClient") as client_cls:
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.__aexit__.return_value = None
+            client.get.side_effect = RuntimeError("sina down")
+            client_cls.return_value = client
+
+            quotes = await fetch_us_quotes()
+
+        self.assertEqual(quotes, ())
+        status = us_market_feed_status()
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["consecutive_failures"], 1)
+        self.assertIn("sina down", str(status["last_error"]))
+
+        with patch("mini_hermes.us_market.httpx.AsyncClient") as client_cls:
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.__aexit__.return_value = None
+            response = AsyncMock()
+            response.raise_for_status = lambda: None
+            response.content = RAW_QUOTES.encode("gbk", errors="replace")
+            client.get.return_value = response
+            client_cls.return_value = client
+
+            quotes = await fetch_us_quotes()
+
+        self.assertEqual(len(quotes), 3)
+        status = us_market_feed_status()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["consecutive_failures"], 0)
+        self.assertIsNone(status["last_error"])
+
+    async def test_parse_empty_counts_as_failure(self) -> None:
+        with patch("mini_hermes.us_market.httpx.AsyncClient") as client_cls:
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.__aexit__.return_value = None
+            response = AsyncMock()
+            response.raise_for_status = lambda: None
+            response.content = b'var hq_str_gb_dji="";'
+            client.get.return_value = response
+            client_cls.return_value = client
+
+            quotes = await fetch_us_quotes()
+
+        self.assertEqual(quotes, ())
+        status = us_market_feed_status()
+        self.assertEqual(status["consecutive_failures"], 1)
+        self.assertEqual(status["last_error"], "parse_empty")
+
 
 
 if __name__ == "__main__":
