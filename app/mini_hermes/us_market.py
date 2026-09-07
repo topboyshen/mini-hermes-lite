@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 import logging
-import re
 import threading
+import re
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
@@ -28,24 +29,11 @@ _SINA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _MARKET_TIMEZONE = ZoneInfo("America/New_York")
 _AS_OF_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+
+
 _feed_lock = threading.Lock()
 _consecutive_failures = 0
 _last_error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class UsIndexQuote:
-    code: str
-    name: str
-    price: str
-    change: str
-    percent: str
-    as_of: str
-    observed_at: datetime
-
-    @property
-    def trade_date(self) -> date:
-        return self.observed_at.date()
 
 
 def us_market_feed_status() -> dict[str, object]:
@@ -79,6 +67,69 @@ def _record_feed_failure(error: str) -> None:
         _last_error = error
 
 
+@dataclass(frozen=True, slots=True)
+class UsIndexQuote:
+    code: str
+    name: str
+    price: str
+    change: str
+    percent: str
+    as_of: str
+    observed_at: datetime
+    open: str | None = None
+    high: str | None = None
+    low: str | None = None
+    week52_high: str | None = None
+    week52_low: str | None = None
+
+    @property
+    def trade_date(self) -> date:
+        return self.observed_at.date()
+
+
+def _optional_number(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not number.is_finite() or number <= 0:
+        return None
+    return text
+
+
+def _optional_range(
+    parts: list[str],
+    price: str,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Extract open/high/low/52w fields when Sina supplies the longer record."""
+    if len(parts) < 10:
+        return None, None, None, None, None
+    open_price = _optional_number(parts[5])
+    high = _optional_number(parts[6])
+    low = _optional_number(parts[7])
+    week52_high = _optional_number(parts[8]) if len(parts) > 8 else None
+    week52_low = _optional_number(parts[9]) if len(parts) > 9 else None
+    try:
+        last = Decimal(price)
+        if high is not None and Decimal(high) < last:
+            high = None
+        if low is not None and Decimal(low) > last:
+            low = None
+        if (
+            week52_high is not None
+            and week52_low is not None
+            and Decimal(week52_high) <= Decimal(week52_low)
+        ):
+            week52_high = None
+            week52_low = None
+    except InvalidOperation:
+        return open_price, high, low, week52_high, week52_low
+    return open_price, high, low, week52_high, week52_low
+
+
 def _market_timestamp(as_of: str) -> datetime:
     observed_at = datetime.strptime(as_of.strip(), _AS_OF_FORMAT).replace(
         tzinfo=_SINA_TIMEZONE
@@ -106,6 +157,7 @@ def parse_us_quotes(raw: str) -> tuple[UsIndexQuote, ...]:
             observed_at = _market_timestamp(as_of)
         except (ValueError, OverflowError):
             continue
+        open_price, high, low, week52_high, week52_low = _optional_range(parts, price)
         quotes.append(
             UsIndexQuote(
                 code=code,
@@ -115,6 +167,11 @@ def parse_us_quotes(raw: str) -> tuple[UsIndexQuote, ...]:
                 percent=percent,
                 as_of=as_of,
                 observed_at=observed_at,
+                open=open_price,
+                high=high,
+                low=low,
+                week52_high=week52_high,
+                week52_low=week52_low,
             )
         )
     return tuple(quotes)
@@ -139,6 +196,8 @@ async def fetch_us_quotes() -> tuple[UsIndexQuote, ...]:
         return ()
     _record_feed_success()
     return quotes
+
+
 
 
 def _signed(value: str) -> str:
