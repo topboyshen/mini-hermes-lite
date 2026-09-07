@@ -73,13 +73,13 @@ class Settings:
         missing: list[str] = []
         if not self.telegram_token:
             missing.append("TELEGRAM_TOKEN")
-        provider = self.model.partition(":")[0].lower()
         key_by_provider = {
             "openai": "OPENAI_API_KEY",
             "openai-chat": "OPENAI_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
         }
+        provider = self.model.partition(":")[0].lower()
         key_name = key_by_provider.get(provider)
         if key_name and not os.getenv(key_name, "").strip():
             missing.append(key_name)

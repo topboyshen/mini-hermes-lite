@@ -1,32 +1,48 @@
 # Mini Hermes Lite v0.1
 
-低资源、长期在线、Telegram 驱动的 A 股研究 Agent。它使用 PydanticAI 调用
-`quanters-akshare-mcp`，SQLite 保存用户偏好、自选股与短期对话，Telegram JobQueue
-（APScheduler）在每天 08:30 推送晨报。
+低资源、长期在线、Telegram 驱动的 AI Agent 节点。普通私聊消息进入 pi coding
+agent；A 股命令由 PydanticAI 调用 `quanters-akshare-mcp` 完成，海外市场晨报采用
+隔离的行情与判定路径。SQLite
+保存用户偏好、自选股与短期对话，Telegram JobQueue（APScheduler）在每天 08:30
+推送晨报。
 
 ## 命令
 
 - `/stock 600875`：个股研究
 - `/market`：市场概览
-- `/report`：立即生成晨报
+- `/report`：立即生成海外市场晨报
 - `/watch add|remove|list`：管理自选股
 - `/style 稳健中线`：保存投资风格
 - `/subscribe`、`/unsubscribe`：管理 08:30 晨报
 - `/status`：CPU、内存、MCP、API 状态
 - `/whoami`：显示 Telegram 用户 ID
 
-### pi 完整交互 channel
+### Telegram 单通道
 
-- `/pi`：进入持续 pi 会话，后续普通消息都交给 pi
-- `/pi <任务>`：立即执行任务并进入 pi 模式
+- 普通私聊消息：直接进入持续的 pi 会话，无需切换模式
+- 纯文本若含明确 6 位 A 股代码（如 `600875` 或 `分析 600875`），会自动改走 Mini Hermes 个股研究；含“今日行情/A股”等短语但无代码时，会提示改用 `/stock` 或 `/market`，避免误进 pi
+- pi 与 Hermes 的短期对话记忆按 channel 隔离，互不污染
 - `/new`：新建空白 pi 会话
 - `/abort`：中止当前 pi 任务
 - `/pistatus`：查看 channel 模型和忙碌状态
-- `/hermes`：退出 pi 模式，返回 A 股 Agent
+
+`/stock`、`/market` 等 A 股命令始终进入 Mini Hermes；`/report` 与定时报告不调用模型、
+不挂载 AKShare，也不读取自选股和对话记忆。晨报覆盖美股三大指数、VIX、美国 2Y/10Y
+国债收益率、美元指数、COMEX 黄金、WTI 原油和 BTC，并显示跨资产项目的数据时间与完整度。
+所有数字、强弱排序、固定观察阈值和最终文字均由程序确定性生成，不经过模型。任一外部
+数据源失败时只省略对应项目，不会阻断整份报告。Telegram 输出采用移动端纯文本信息卡，
+无需 Markdown 渲染。定时报告在美股交易日收盘后的上海时间
+08:30 推送，通常为周二至周六。旧的 `/pi` 和 `/hermes` 命令仅保留兼容提示，不再改变
+路由状态。
+
+美股三大指数使用带源时间戳的行情，并换算为美东交易日期。三项数据必须来自同一个、
+符合 NYSE 常规交易日历的最近已完成交易日；日期缺失、不一致、过期或仍处于美股盘中时，
+报告会明确降级并停止生成指数方向、排序、温度及阈值结论。
 
 pi 以独立的 `pi-channel` 系统用户运行，拥有完整的编码 Agent 工具，但写入范围限制在
 `/opt/mini-hermes/workspace`。会话保存在 `/var/lib/mini-hermes-pi/sessions`，Telegram
-Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。
+Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。远程执行仅允许白名单
+用户在 Bot 私聊中触发，群聊请求会被拒绝。
 
 ## 安全默认值
 

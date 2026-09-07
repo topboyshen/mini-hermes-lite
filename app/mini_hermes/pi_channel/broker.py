@@ -44,7 +44,7 @@ class PiChannelBroker:
         self.socket_path = Path(os.getenv("PI_CHANNEL_SOCKET", "/run/mini-hermes-pi/pi.sock"))
         self.state_dir = Path(os.getenv("PI_CHANNEL_STATE_DIR", "/var/lib/mini-hermes-pi"))
         self.workspace = Path(os.getenv("PI_CHANNEL_WORKSPACE", "/opt/mini-hermes/workspace"))
-        self.model = os.getenv("PI_CHANNEL_MODEL", "ollama-cloud/deepseek-v4-flash")
+        self.model = os.getenv("PI_CHANNEL_MODEL", "ollama-cloud/deepseek-v4-pro")
         self.thinking = os.getenv("PI_CHANNEL_THINKING", "off")
         self.timeout_seconds = int(os.getenv("PI_CHANNEL_TIMEOUT_SECONDS", "600"))
         self._lock = asyncio.Lock()

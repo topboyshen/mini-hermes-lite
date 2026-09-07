@@ -28,7 +28,6 @@ INSTRUCTIONS = """
 6. 个股分析优先覆盖：行情快照、趋势/量价、基本面或催化、主要风险、后续观察点。
 """.strip()
 
-
 class AgentService:
     def __init__(self, settings: Settings, memory: MemoryStore) -> None:
         self.settings = settings
@@ -38,18 +37,19 @@ class AgentService:
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_agent_runs)
         toolsets = load_mcp_toolsets(settings.mcp_config)
         self._toolset_count = len(toolsets)
+        self._interactive_model = self._build_model(settings.model)
         self._agent: Agent[None, str] = Agent(
-            self._build_model(),
+            self._interactive_model,
             instructions=INSTRUCTIONS,
             toolsets=toolsets,
             retries=2,
         )
 
-    def _build_model(self) -> str | OpenAIChatModel:
+    def _build_model(self, model_setting: str) -> str | OpenAIChatModel:
         base_url = os.getenv("OPENAI_BASE_URL", "").strip()
         if not base_url:
-            return self.settings.model
-        model_name = self.settings.model.partition(":")[2] or self.settings.model
+            return model_setting
+        model_name = model_setting.partition(":")[2] or model_setting
         return OpenAIChatModel(
             model_name,
             provider=OpenAIProvider(
@@ -61,9 +61,18 @@ class AgentService:
     async def start(self) -> None:
         if self._started:
             return
-        await self._stack.enter_async_context(self._agent)
+        try:
+            await self._stack.enter_async_context(self._agent)
+        except Exception:
+            await self._stack.aclose()
+            self._stack = AsyncExitStack()
+            raise
         self._started = True
-        LOGGER.info("agent_started model=%s mcp_toolsets=%s", self.settings.model, self._toolset_count)
+        LOGGER.info(
+            "agent_started model=%s mcp_toolsets=%s",
+            self.settings.model,
+            self._toolset_count,
+        )
 
     async def stop(self) -> None:
         if not self._started:
@@ -83,14 +92,20 @@ class AgentService:
     async def run(self, user_id: int, prompt: str) -> str:
         if not self._started:
             raise RuntimeError("Agent is not started")
-        history = await self.memory.recent_messages(user_id, self.settings.max_history_messages)
+        history = await self.memory.recent_messages(
+            user_id, self.settings.max_history_messages, channel="hermes"
+        )
         watchlist = await self.memory.list_watch(user_id)
         style = await self.memory.get_style(user_id)
         context_lines = ["用户长期偏好与上下文："]
         context_lines.append(f"投资风格：{style or '未设置'}")
-        context_lines.append(f"自选股：{', '.join(watchlist) if watchlist else '未设置'}")
+        context_lines.append(
+            f"自选股：{', '.join(watchlist) if watchlist else '未设置'}"
+        )
         if history:
-            compact = "\n".join(f"{role}: {content[:800]}" for role, content in history)
+            compact = "\n".join(
+                f"{role}: {content[:800]}" for role, content in history
+            )
             context_lines.append(f"最近对话：\n{compact}")
         context_text = "\n".join(context_lines)
         full_prompt = f"{context_text}\n\n本次请求：{prompt}"
@@ -101,5 +116,5 @@ class AgentService:
                 timeout=self.settings.agent_timeout_seconds,
             )
         output = str(result.output).strip()
-        await self.memory.append_turn(user_id, prompt, output)
+        await self.memory.append_turn(user_id, prompt, output, channel="hermes")
         return output
