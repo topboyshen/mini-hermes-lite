@@ -293,6 +293,7 @@ class CommandsMixin:
             f"US feed: {status['us_feed']}\n"
             f"MCP: {'ready' if mcp_ready else 'waiting for model key'} ({toolset_count} server)\n"
             f"API: {'configured' if api_ready else 'missing key'}\n"
+            f"A股研究模型: {self.settings.model}\n"
             f"Memory: {stats['users']} user / {stats['conversations']} message",
         )
 

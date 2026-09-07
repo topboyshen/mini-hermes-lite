@@ -6,11 +6,27 @@ import json
 import logging
 import os
 from pathlib import Path
-import signal
+import pwd
+import socket
+import struct
 import uuid
+
+from mini_hermes.pi_channel.client import MAX_MESSAGE_BYTES
 
 
 LOGGER = logging.getLogger(__name__)
+RESEARCH_TIMEOUT_SECONDS = 120
+
+RESEARCH_ERRORS = {
+    "auth_required": "Grok 账号授权不可用，请重新授权后重试",
+    "quota": "Grok 账号额度不足，请检查订阅状态",
+    "rate_limited": "Grok 请求限流，请稍后重试",
+    "timeout": "Grok 研究请求超时，请缩小范围后重试",
+    "invalid_request": "Grok 研究请求格式不受支持",
+    "model_unavailable": "Grok 4.6 研究模型配置不一致",
+    "output_limit": "Grok 输出达到长度限制，请缩小研究范围",
+    "upstream_error": "Grok 服务暂时不可用，请稍后重试",
+}
 
 
 def _message_text(message: object) -> str:
@@ -50,6 +66,119 @@ class PiChannelBroker:
         self._lock = asyncio.Lock()
         self._process: asyncio.subprocess.Process | None = None
         self._active_user_id: int | None = None
+        self._research_slots = asyncio.Semaphore(1)
+        self._research_processes: set[asyncio.subprocess.Process] = set()
+
+    def _authorize_research(self, writer: asyncio.StreamWriter) -> None:
+        """Keep the credential-backed model relay local to the main Bot and root."""
+        connection = writer.get_extra_info("socket")
+        if connection is None or not hasattr(socket, "SO_PEERCRED"):
+            raise ValueError("research peer identity unavailable")
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        _pid, uid, _gid = struct.unpack("3i", credentials)
+        if uid not in {0, pwd.getpwnam("mini-hermes").pw_uid}:
+            raise ValueError("research peer is not authorized")
+
+    @staticmethod
+    async def _terminate_research(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+
+    async def _research_exchange(
+        self, process: asyncio.subprocess.Process, encoded: bytes
+    ) -> bytes:
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(encoded)
+        await process.stdin.drain()
+        process.stdin.close()
+        chunks = []
+        size = 0
+        while chunk := await process.stdout.read(min(65536, MAX_MESSAGE_BYTES + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_MESSAGE_BYTES:
+                raise ValueError("research response exceeds size limit")
+        await process.wait()
+        return b"".join(chunks)
+
+    async def _run_research_completion(
+        self, request: object, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self._authorize_research(writer)
+        if not isinstance(request, dict) or set(request) - {"systemPrompt", "messages", "tools", "maxTokens"}:
+            raise ValueError("invalid research request")
+        encoded = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        process = None
+        exchange = None
+        disconnected = asyncio.create_task(reader.read(1))
+        error_code = "upstream_error"
+        try:
+            # Includes queue time. This relay has no relation to the coding-chat process.
+            async with asyncio.timeout(RESEARCH_TIMEOUT_SECONDS):
+                async with self._research_slots:
+                    if disconnected.done():
+                        return
+                    if self.model != "xai/grok-4.6" or self.thinking != "low":
+                        error_code = "model_unavailable"
+                    else:
+                        process = await asyncio.create_subprocess_exec(
+                            "/usr/bin/node",
+                            "--max-old-space-size=192",
+                            str(Path(__file__).with_name("research_completion.mjs")),
+                            cwd=self.workspace,
+                            env={**os.environ, "PI_OFFLINE": "1"},
+                            stdin=asyncio.subprocess.PIPE,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        self._research_processes.add(process)
+                        exchange = asyncio.create_task(self._research_exchange(process, encoded))
+                        done, _pending = await asyncio.wait(
+                            {exchange, disconnected}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if disconnected in done:
+                            return
+                        output = await exchange
+                        result = json.loads(output)
+                        if not isinstance(result, dict):
+                            raise ValueError("invalid research result")
+                        if process.returncode == 0 and result.get("ok") is True:
+                            message = result.get("message")
+                            if not isinstance(message, dict) or message.get("role") != "assistant":
+                                raise ValueError("invalid research message")
+                            reply = {"type": "result", "ok": True, "message": message}
+                            if len((json.dumps(reply, ensure_ascii=False, separators=(",", ":")) + "\n").encode()) > MAX_MESSAGE_BYTES:
+                                error_code = "output_limit"
+                            else:
+                                await self._send(writer, reply)
+                                return
+                        else:
+                            candidate = result.get("error_code")
+                            if isinstance(candidate, str) and candidate in RESEARCH_ERRORS:
+                                error_code = candidate
+        except TimeoutError:
+            error_code = "timeout"
+        except (ValueError, OSError, json.JSONDecodeError):
+            error_code = "upstream_error"
+        finally:
+            if process is not None:
+                await self._terminate_research(process)
+                self._research_processes.discard(process)
+            for task in (exchange, disconnected):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(*(task for task in (exchange, disconnected) if task is not None), return_exceptions=True)
+        LOGGER.warning("research_completion_failed code=%s", error_code)
+        await self._send(writer, {"type": "result", "ok": False, "error": RESEARCH_ERRORS[error_code]})
 
     def _prepare_paths(self) -> None:
         group_id = grp.getgrnam("mini-hermes").gr_gid
@@ -84,7 +213,7 @@ class PiChannelBroker:
         return directory / name
 
     async def _send(self, writer: asyncio.StreamWriter, payload: dict[str, object]) -> None:
-        writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        writer.write((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
         await writer.drain()
 
     async def _stop_process(self) -> None:
@@ -217,7 +346,11 @@ class PiChannelBroker:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=10)
+            if len(raw) > MAX_MESSAGE_BYTES:
+                raise ValueError("request exceeds size limit")
             request = json.loads(raw)
+            if not isinstance(request, dict):
+                raise ValueError("request must be an object")
             action = str(request.get("action", ""))
             if action == "status":
                 await self._send(
@@ -228,8 +361,14 @@ class PiChannelBroker:
                         "busy": self._lock.locked(),
                         "active_user_id": self._active_user_id,
                         "model": self.model,
+                        "research_active": len(self._research_processes),
                     },
                 )
+                return
+            if action == "research_completion":
+                if set(request) != {"action", "request"}:
+                    raise ValueError("invalid research envelope")
+                await self._run_research_completion(request["request"], reader, writer)
                 return
             user_id = int(request.get("user_id", 0))
             if user_id <= 0:
@@ -271,7 +410,9 @@ class PiChannelBroker:
 
     async def run(self) -> None:
         self._prepare_paths()
-        server = await asyncio.start_unix_server(self._handle, path=self.socket_path)
+        server = await asyncio.start_unix_server(
+            self._handle, path=self.socket_path, limit=MAX_MESSAGE_BYTES + 1
+        )
         group_id = grp.getgrnam("mini-hermes").gr_gid
         os.chown(self.socket_path, -1, group_id)
         self.socket_path.chmod(0o660)

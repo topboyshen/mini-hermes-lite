@@ -1,12 +1,35 @@
 import asyncio
+import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from mini_hermes.agent.service import AgentService
 
 
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pi_model_does_not_use_legacy_openai_credentials(self) -> None:
+        service = object.__new__(AgentService)
+        service.settings = SimpleNamespace(
+            pi_channel_socket=Path('/tmp/research-test.sock'),
+            agent_timeout_seconds=120,
+        )
+        with patch.dict(os.environ, {
+            'OPENAI_BASE_URL': 'https://legacy.invalid/v1',
+            'OPENAI_API_KEY': 'not-a-real-key',
+        }), patch('mini_hermes.agent.service.OpenAIProvider') as provider:
+            model = service._build_model('pi:grok-4.6')
+        self.assertEqual(model.model_name, 'grok-4.6')
+        provider.assert_not_called()
+
+    async def test_unknown_pi_model_does_not_fall_back(self) -> None:
+        service = object.__new__(AgentService)
+        with patch('mini_hermes.agent.service.OpenAIProvider') as provider:
+            with self.assertRaisesRegex(ValueError, 'unsupported pi research model'):
+                service._build_model('pi:unknown')
+        provider.assert_not_called()
+
     async def test_interactive_agent_uses_and_persists_memory(self) -> None:
         service = object.__new__(AgentService)
         service._started = True

@@ -10,6 +10,11 @@ from mini_hermes.config import Settings, load_env_file
 
 
 class ConfigTests(unittest.TestCase):
+    def test_pi_research_uses_account_relay_not_an_api_key(self) -> None:
+        with patch.dict(os.environ, {'MODEL': 'pi:grok-4.6', 'TELEGRAM_TOKEN': 'test-token'}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.missing_runtime_settings(), [])
+
     def test_load_env_does_not_overwrite_exported_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

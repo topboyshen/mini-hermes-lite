@@ -19,7 +19,8 @@ agent；A 股命令由 PydanticAI 调用 `quanters-akshare-mcp` 完成，海外�
 
 ### Telegram 单通道
 
-- 普通私聊消息：直接进入持续的 pi 会话，无需切换模式
+- 六位 A 股代码、`分析 600875`：进入 A 股研究，与 `/stock` 使用同一模型和行情工具
+- 其余普通私聊消息：进入持续的 pi 会话，无需切换模式
 - `/new`：新建空白 pi 会话
 - `/abort`：中止当前 pi 任务
 - `/pistatus`：查看 channel 模型和忙碌状态
@@ -45,6 +46,17 @@ Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。远程执行�
 用户在 Bot 私聊中触发，群聊请求会被拒绝。
 
 ## 配置备注
+
+`MODEL=pi:grok-4.6` 让 A 股研究复用 pi-channel 中已有的 Grok 账号授权。
+模型中继只执行一次原生模型请求，不运行 pi 编程 Agent、扩展或 shell 工具；
+原有 AKShare MCP 工具、研究指令、自选及 Hermes 历史仍由主 Bot 管理。
+账号凭据不离开 pi-channel，不复制到主 Bot、配置模板或数据库。
+此模式显式忽略残留的 `OPENAI_BASE_URL`/`OPENAI_API_KEY`，不会失败后回退到 Ollama。
+
+中继使用既有 Unix socket，仅允许主 Bot 与 root 调用；固定 Grok 4.6 / low，
+研究请求单独限流、限时和取消，不终止普通聊天。单次输入/输出最多 2MiB，
+默认最多 4096 输出 token；只支持文本与函数工具，不支持图片或结构化输出模式。
+OAuth 失效、额度、限流等错误返回脱敏类别，不回显模型原始错误或凭据。
 
 `REPORT_MODEL` 不是有效 Settings 键（晨报不调用模型）；可从生产 `.env` 删除。详见 `.env.example`。
 

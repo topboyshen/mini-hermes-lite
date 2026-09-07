@@ -7,6 +7,7 @@ import os
 
 from pydantic_ai import Agent
 from pydantic_ai.mcp import load_mcp_toolsets
+from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -45,7 +46,18 @@ class AgentService:
             retries=2,
         )
 
-    def _build_model(self, model_setting: str) -> str | OpenAIChatModel:
+    def _build_model(self, model_setting: str) -> str | Model:
+        # Account authorization remains in pi-channel. Never fall through to a
+        # legacy OPENAI_BASE_URL/API_KEY for this explicitly selected provider.
+        if model_setting.startswith("pi:"):
+            if model_setting != "pi:grok-4.6":
+                raise ValueError("unsupported pi research model")
+            from mini_hermes.agent.pi_model import PiResearchModel
+
+            return PiResearchModel(
+                self.settings.pi_channel_socket,
+                timeout_seconds=min(self.settings.agent_timeout_seconds, 120),
+            )
         base_url = os.getenv("OPENAI_BASE_URL", "").strip()
         if not base_url:
             return model_setting

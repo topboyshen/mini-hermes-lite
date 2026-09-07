@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 
 ProgressCallback = Callable[[str], Awaitable[None]]
+MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 class PiChannelError(RuntimeError):
@@ -20,7 +21,9 @@ class PiChannelClient:
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
-            return await asyncio.open_unix_connection(self.socket_path)
+            return await asyncio.open_unix_connection(
+                self.socket_path, limit=MAX_MESSAGE_BYTES + 1
+            )
         except (FileNotFoundError, ConnectionRefusedError, PermissionError) as exc:
             raise PiChannelError(f"pi channel unavailable: {exc}") from exc
 
@@ -29,15 +32,20 @@ class PiChannelClient:
         payload: dict[str, object],
         on_progress: ProgressCallback | None = None,
     ) -> dict[str, object]:
+        encoded = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        if len(encoded) > MAX_MESSAGE_BYTES:
+            raise PiChannelError("pi request exceeds the size limit")
         reader, writer = await self._connect()
-        writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        await writer.drain()
         try:
             async with asyncio.timeout(self.timeout_seconds):
+                writer.write(encoded)
+                await writer.drain()
                 while True:
                     raw = await reader.readline()
                     if not raw:
                         raise PiChannelError("pi channel closed before returning a result")
+                    if len(raw) > MAX_MESSAGE_BYTES:
+                        raise PiChannelError("pi response exceeds the size limit")
                     event = json.loads(raw)
                     if event.get("type") == "progress":
                         if on_progress is not None:
@@ -50,6 +58,8 @@ class PiChannelClient:
                     return event
         except TimeoutError as exc:
             raise PiChannelError(f"pi channel timed out after {self.timeout_seconds}s") from exc
+        except ValueError as exc:
+            raise PiChannelError("pi channel returned malformed or oversized data") from exc
         finally:
             writer.close()
             await writer.wait_closed()
@@ -76,3 +86,11 @@ class PiChannelClient:
 
     async def status(self) -> dict[str, object]:
         return await self._request({"action": "status"})
+
+    async def research_completion(self, payload: dict[str, object]) -> dict[str, object]:
+        """One model turn only; tools remain under the research Agent's control."""
+        result = await self._request({"action": "research_completion", "request": payload})
+        message = result.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise PiChannelError("research model returned an invalid response")
+        return message

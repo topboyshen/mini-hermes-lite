@@ -14,7 +14,10 @@
 用 SSH 登录并编辑 `/opt/mini-hermes/.env`，至少填写：
 
 1. `TELEGRAM_TOKEN`
-2. `MODEL` 和对应的 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY` 或 `ANTHROPIC_API_KEY`
+2. `MODEL=pi:grok-4.6`，并在隔离的 pi-channel 中完成 xAI 账号授权；此模式不需要主 Bot 的模型 API Key。
+
+若选择独立 API 提供商，才使用其对应的 API Key。普通聊天与 A 股研究是不同
+模型入口：只改变 pi 的默认模型不会自动改变 `.env` 中的 `MODEL`。
 
 首次可让 `TELEGRAM_ALLOWED_USER_IDS` 留空，然后执行：
 
@@ -51,6 +54,23 @@ systemctl restart mini-hermes
 白名单为空时，Bot 只响应 `/start` 和 `/whoami`，不会调用模型。
 
 ## 验证与排错
+
+Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.6`、
+`PI_CHANNEL_THINKING=low`。当前 Python 适配器依照已锁定的 PydanticAI 2.22.0
+消息接口实现；升级依赖后必须重跑多轮工具/签名回放测试。
+
+离线回归（不读真实聊天，不调用模型、不发送 Telegram）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=app .venv/bin/python -m unittest discover -s tests -v
+node --test tests/test_research_completion.mjs
+```
+
+部署时先验收候选，再同步代码，把生产 `.env` 的 `MODEL` 改为 `pi:grok-4.6`，
+确认无正在执行的研究/聊天后重启 `mini-hermes-pi` 和 `mini-hermes`。
+只有修改 `.env` 而未重启主 Bot 时，旧模型仍留在运行进程里。
+不要复制 `auth.json` 或放宽其权限；原有 OAuth 刷新由 pi 的模型运行时负责。
+回退应用代码时也须恢复与旧代码兼容的 MODEL；不能把已到期的 Ollama 回退称为恢复可用。
 
 ```bash
 cd /opt/mini-hermes
