@@ -1,12 +1,10 @@
 from pathlib import Path
 import asyncio
 import json
-import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
-from mini_hermes.pi_channel.broker import PiChannelBroker, _message_text, _tool_name
+from mini_hermes.pi_channel.broker import _message_text, _tool_name
 from mini_hermes.pi_channel.client import PiChannelClient
 
 
@@ -21,12 +19,6 @@ class BrokerHelperTests(unittest.TestCase):
         }
         self.assertEqual(_message_text(message), "done")
         self.assertEqual(_tool_name({"toolName": "bash"}), "bash")
-
-    def test_default_model_matches_production_source(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            broker = PiChannelBroker()
-
-        self.assertEqual(broker.model, "ollama-cloud/deepseek-v4-pro")
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):

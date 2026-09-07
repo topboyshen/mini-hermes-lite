@@ -51,8 +51,6 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_conversations_user_id
                 ON conversations(user_id, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_conversations_user_channel
-                ON conversations(user_id, channel, id DESC);
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -63,6 +61,12 @@ class MemoryStore:
             """
         )
         self._migrate_conversation_channel()
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversations_user_channel
+                ON conversations(user_id, channel, id DESC)
+            """
+        )
         self._connection.commit()
 
     def _migrate_conversation_channel(self) -> None:

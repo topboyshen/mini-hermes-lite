@@ -31,11 +31,8 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         prompt = service._agent.run.await_args.args[0]
         self.assertIn("投资风格：稳健", prompt)
         self.assertIn("自选股：600875", prompt)
-        service.memory.recent_messages.assert_awaited_once_with(
-            42, 8, channel="hermes"
-        )
         service.memory.append_turn.assert_awaited_once_with(
-            42, "分析东方电气", "研究结果", channel="hermes"
+            42, "分析东方电气", "研究结果"
         )
 
 

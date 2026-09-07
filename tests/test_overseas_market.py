@@ -6,14 +6,17 @@ from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from mini_hermes import overseas_market
+from mini_hermes.market_context import MarketContext
 from mini_hermes.overseas_market import (
     CrossAssetQuote,
+    RegionalIndexQuote,
     TreasuryCurve,
     fetch_overseas_snapshot,
     parse_cboe_vix,
     parse_coinbase_btc,
     parse_sina_dollar_quote,
     parse_sina_hf_quotes,
+    parse_sina_regional_quotes,
     parse_treasury_curve,
 )
 from mini_hermes.us_market import UsIndexQuote
@@ -23,7 +26,15 @@ SINA_HF_RAW = (
     'var hq_str_hf_GC="2450.50,x,x,x,2470.00,2420.00,05:15:00,'
     '2400.00,2410.00,x,x,x,2026-08-04,COMEX黄金";\n'
     'var hq_str_hf_CL="75.25,x,x,x,76.50,73.80,05:14:00,'
-    '74.00,74.50,x,x,x,2026-08-04,WTI原油";'
+    '74.00,74.50,x,x,x,2026-08-04,WTI原油";\n'
+    'var hq_str_hf_SI="48.50,x,x,x,49.10,47.80,05:16:00,'
+    '48.00,48.10,x,x,x,2026-08-04,COMEX白银";'
+)
+
+SINA_REGIONAL_RAW = (
+    'var hq_str_int_nikkei="日经指数,44946.64,-408.35,-0.90";\n'
+    'var hq_str_int_hangseng="恒生指数,25120.11,180.22,0.72";\n'
+    'var hq_str_int_ftse="伦敦指数,9284.83,70.85,0.77";'
 )
 
 SINA_DOLLAR_RAW = (
@@ -37,22 +48,25 @@ TREASURY_XML = """<?xml version="1.0" encoding="utf-8"?>
       xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
   <entry><content><m:properties>
     <d:NEW_DATE>2026-08-01T00:00:00</d:NEW_DATE>
-    <d:BC_2YEAR>3.99</d:BC_2YEAR><d:BC_10YEAR>4.23</d:BC_10YEAR>
+    <d:BC_3MONTH>3.90</d:BC_3MONTH><d:BC_2YEAR>3.99</d:BC_2YEAR>
+    <d:BC_10YEAR>4.23</d:BC_10YEAR><d:BC_30YEAR>4.50</d:BC_30YEAR>
   </m:properties></content></entry>
   <entry><content><m:properties>
     <d:NEW_DATE>2026-08-03T00:00:00</d:NEW_DATE>
-    <d:BC_2YEAR>4.00</d:BC_2YEAR><d:BC_10YEAR>4.24</d:BC_10YEAR>
+    <d:BC_3MONTH>3.91</d:BC_3MONTH><d:BC_2YEAR>4.00</d:BC_2YEAR>
+    <d:BC_10YEAR>4.24</d:BC_10YEAR><d:BC_30YEAR>4.52</d:BC_30YEAR>
   </m:properties></content></entry>
   <entry><content><m:properties>
     <d:NEW_DATE>2026-08-04T00:00:00</d:NEW_DATE>
-    <d:BC_2YEAR>4.02</d:BC_2YEAR><d:BC_10YEAR>4.25</d:BC_10YEAR>
+    <d:BC_3MONTH>3.93</d:BC_3MONTH><d:BC_2YEAR>4.02</d:BC_2YEAR>
+    <d:BC_10YEAR>4.25</d:BC_10YEAR><d:BC_30YEAR>4.55</d:BC_30YEAR>
   </m:properties></content></entry>
 </feed>"""
 
 
 class OverseasParserTests(unittest.TestCase):
     def test_sina_futures_positions_and_decimal_calculations(self) -> None:
-        gold, crude = parse_sina_hf_quotes(SINA_HF_RAW)
+        gold, crude, silver = parse_sina_hf_quotes(SINA_HF_RAW)
 
         self.assertEqual(gold.code, "hf_GC")
         self.assertEqual(gold.price, Decimal("2450.50"))
@@ -67,6 +81,9 @@ class OverseasParserTests(unittest.TestCase):
         self.assertEqual(gold.low, Decimal("2420.00"))
         self.assertEqual(gold.as_of, "2026-08-04 05:15:00")
         self.assertEqual(crude.change, Decimal("1.25"))
+        self.assertEqual(silver.code, "hf_SI")
+        self.assertEqual(silver.price, Decimal("48.50"))
+        self.assertEqual(silver.change, Decimal("0.50"))
 
     def test_sina_dollar_positions_and_decimal_calculations(self) -> None:
         quote = parse_sina_dollar_quote(SINA_DOLLAR_RAW)
@@ -119,6 +136,20 @@ class OverseasParserTests(unittest.TestCase):
         self.assertEqual(curve.two_year_change_bp, Decimal("2.00"))
         self.assertEqual(curve.ten_year_change_bp, Decimal("1.00"))
         self.assertEqual(curve.spread_bp, Decimal("23.00"))
+        self.assertEqual(curve.three_month, Decimal("3.93"))
+        self.assertEqual(curve.thirty_year, Decimal("4.55"))
+        self.assertEqual(curve.three_month_change_bp, Decimal("2.00"))
+        self.assertEqual(curve.thirty_year_change_bp, Decimal("3.00"))
+
+    def test_sina_regional_compact_records(self) -> None:
+        nikkei, hang_seng, ftse = parse_sina_regional_quotes(SINA_REGIONAL_RAW)
+
+        self.assertEqual(nikkei.code, "int_nikkei")
+        self.assertEqual(nikkei.price, Decimal("44946.64"))
+        self.assertEqual(nikkei.change, Decimal("-408.35"))
+        self.assertEqual(nikkei.percent, Decimal("-0.90"))
+        self.assertEqual(hang_seng.percent, Decimal("0.72"))
+        self.assertEqual(ftse.name, "伦敦指数")
 
     def test_coinbase_combines_ticker_and_stats(self) -> None:
         quote = parse_coinbase_btc(
@@ -223,6 +254,13 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
             ten_year_change_bp=Decimal("0"),
             spread_bp=Decimal("20"),
         )
+        nikkei = RegionalIndexQuote(
+            code="int_nikkei",
+            name="Nikkei",
+            price=Decimal("1"),
+            change=Decimal("0"),
+            percent=Decimal("0"),
+        )
 
         async def futures(client):
             seen_clients.append(client)
@@ -245,6 +283,15 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
             seen_clients.append(client)
             return btc
 
+        async def regional(client):
+            seen_clients.append(client)
+            return (nikkei,)
+
+        async def market_context(client, now):
+            seen_clients.append(client)
+            self.assertIsNotNone(now.tzinfo)
+            return MarketContext(available_sources=("Fed", "BEA"))
+
         with (
             patch.object(overseas_market.httpx, "AsyncClient", return_value=fake_client),
             patch.object(
@@ -257,6 +304,8 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
             patch.object(overseas_market, "_fetch_cboe_vix", side_effect=failed_vix),
             patch.object(overseas_market, "_fetch_treasury", side_effect=treasury),
             patch.object(overseas_market, "_fetch_coinbase_btc", side_effect=bitcoin),
+            patch.object(overseas_market, "_fetch_sina_regional", side_effect=regional),
+            patch.object(overseas_market, "fetch_market_context", side_effect=market_context),
             self.assertLogs(overseas_market.LOGGER, level="WARNING") as logs,
         ):
             snapshot = await fetch_overseas_snapshot(year=2026)
@@ -264,7 +313,9 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.us_indices, (us_quote,))
         self.assertEqual(snapshot.assets, (gold, dollar, btc))
         self.assertEqual(snapshot.treasury, curve)
-        self.assertEqual(seen_clients, [fake_client] * 5)
+        self.assertEqual(snapshot.regional_indices, (nikkei,))
+        self.assertEqual(snapshot.market_context, MarketContext(available_sources=("Fed", "BEA")))
+        self.assertEqual(seen_clients, [fake_client] * 7)
         self.assertIn("source=cboe_vix", "\n".join(logs.output))
 
 

@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+from hashlib import sha256
 import logging
 import re
 import time
 from typing import Awaitable, Callable, Sequence
 from zoneinfo import ZoneInfo
 
-from telegram import Bot, BotCommand, Message, Update
+from telegram import (
+    Bot,
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -24,7 +33,11 @@ from mini_hermes.memory import MemoryStore
 from mini_hermes.monitor import system_status
 from mini_hermes.overseas_market import OverseasMarketSnapshot, fetch_overseas_snapshot
 from mini_hermes.pi_channel import PiChannelClient, PiChannelError
-from mini_hermes.reporting import compose_global_report
+from mini_hermes.reporting import (
+    GlobalReportBundle,
+    compose_global_report_bundle,
+    compose_weekly_report,
+)
 from mini_hermes.scheduler import parse_daily_time
 
 
@@ -34,6 +47,11 @@ _STOCK_CODE_IN_TEXT = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 _STOCK_ACTION = re.compile(r"(看|分析|研究)")
 _STRONG_ASHARE = re.compile(
     r"(A\s*股|沪深|上证|深证|创业板|科创板|北交所|大盘走势|市场概览|今日行情|个股研究)"
+)
+
+
+FULL_REPORT_CALLBACK = re.compile(
+    r"^market_full:([0-9a-f]{32})$"
 )
 
 
@@ -66,8 +84,6 @@ def classify_plain_text_stock_intent(text: str) -> tuple[str, str | None]:
     if _STRONG_ASHARE.search(stripped) and code_match is None:
         return ("hint", None)
     return ("pi", None)
-
-
 
 
 class ReportDeliveryError(RuntimeError):
@@ -115,6 +131,7 @@ class MiniHermesBot:
             ("stock", self.stock_command),
             ("market", self.market_command),
             ("report", self.report_command),
+            ("weekly", self.weekly_command),
             ("watch", self.watch_command),
             ("style", self.style_command),
             ("subscribe", self.subscribe_command),
@@ -128,6 +145,12 @@ class MiniHermesBot:
         ]
         for name, callback in commands:
             self.application.add_handler(CommandHandler(name, callback))
+        self.application.add_handler(
+            CallbackQueryHandler(
+                self.full_report_callback,
+                pattern=FULL_REPORT_CALLBACK,
+            )
+        )
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))
         self.application.add_error_handler(self.error_handler)
 
@@ -144,6 +167,7 @@ class MiniHermesBot:
                 BotCommand("stock", "个股研究：/stock 600875"),
                 BotCommand("market", "市场概览"),
                 BotCommand("report", "立即生成海外市场晨报"),
+                BotCommand("weekly", "查看本周海外市场简报"),
                 BotCommand("watch", "管理自选股"),
                 BotCommand("style", "设置投资风格"),
                 BotCommand("subscribe", "订阅海外市场晨报"),
@@ -161,7 +185,15 @@ class MiniHermesBot:
             time=parse_daily_time(self.settings.daily_report_time, self.settings.timezone),
             name="daily-report",
         )
-        LOGGER.info("telegram_started daily_report=%s", self.settings.daily_report_time)
+        application.job_queue.run_daily(
+            self.weekly_report_job,
+            time=parse_daily_time("09:00", self.settings.timezone),
+            name="weekly-report",
+        )
+        LOGGER.info(
+            "telegram_started daily_report=%s weekly_report=saturday-09:00",
+            self.settings.daily_report_time,
+        )
 
     async def _post_shutdown(self, application: Application) -> None:
         if self.agent is not None:
@@ -248,18 +280,53 @@ class MiniHermesBot:
         )
         await self._finish_progress(update, progress, response)
 
-    async def _generate_global_report(
+    async def _generate_global_report_bundle(
         self, snapshot: OverseasMarketSnapshot | None = None
-    ) -> str:
-        if snapshot is None:
-            snapshot = await fetch_overseas_snapshot()
+    ) -> GlobalReportBundle:
         generated_at = datetime.now(ZoneInfo(self.settings.timezone))
+        if snapshot is None:
+            snapshot = await fetch_overseas_snapshot(now=generated_at)
         report_date = generated_at.date().isoformat()
-        return compose_global_report(
+        return compose_global_report_bundle(
             report_date,
             snapshot,
             generated_at=generated_at,
         )
+
+    async def _generate_global_report(
+        self, snapshot: OverseasMarketSnapshot | None = None
+    ) -> str:
+        """Compatibility wrapper for callers that still need the full text."""
+        return (await self._generate_global_report_bundle(snapshot)).full
+
+    @staticmethod
+    def _full_report_markup(bundle: GlobalReportBundle) -> InlineKeyboardMarkup:
+        report_id = sha256(bundle.full.encode("utf-8")).hexdigest()[:32]
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "查看完整数据",
+                    callback_data=f"market_full:{report_id}",
+                )
+            ]]
+        )
+
+    @staticmethod
+    async def _reply_to_callback(query: object, bot: Bot, chat_id: int, text: str) -> None:
+        message = getattr(query, "message", None)
+        if message is not None:
+            await message.reply_text(text)
+            return
+        await bot.send_message(chat_id=chat_id, text=text)
+
+    async def _generate_weekly_report(self) -> str:
+        generated_at = datetime.now(ZoneInfo(self.settings.timezone))
+        end_date = generated_at.date()
+        start_date = end_date - timedelta(days=6)
+        reports = await self.memory.market_reports_between(
+            start_date.isoformat(), end_date.isoformat()
+        )
+        return compose_weekly_report(end_date.isoformat(), reports)
 
     async def _deliver_report(
         self,
@@ -268,24 +335,30 @@ class MiniHermesBot:
         report: str,
         *,
         progress: Message | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> list[int]:
         if not report.strip():
             raise ValueError("Refusing to deliver an empty report")
         chunks = [report[index : index + 4000] for index in range(0, len(report), 4000)]
         message_ids: list[int] = []
+        pending_markup = reply_markup
         if progress is not None:
             try:
-                await progress.edit_text(chunks[0])
+                edit_kwargs = {"reply_markup": pending_markup} if pending_markup is not None else {}
+                await progress.edit_text(chunks[0], **edit_kwargs)
                 message_ids.append(progress.message_id)
                 chunks = chunks[1:]
+                pending_markup = None
             except Exception:  # noqa: BLE001 - retry as fresh Telegram messages
                 LOGGER.exception("report_progress_edit_failed chat_id=%s", chat_id)
         for chunk in chunks:
             try:
-                message = await bot.send_message(chat_id=chat_id, text=chunk)
+                send_kwargs = {"reply_markup": pending_markup} if pending_markup is not None else {}
+                message = await bot.send_message(chat_id=chat_id, text=chunk, **send_kwargs)
             except Exception as exc:  # noqa: BLE001 - retain partial delivery audit
                 raise ReportDeliveryError(message_ids) from exc
             message_ids.append(message.message_id)
+            pending_markup = None
         return message_ids
 
     async def _run_report(self, update: Update) -> None:
@@ -299,7 +372,7 @@ class MiniHermesBot:
         started = time.monotonic()
         LOGGER.info("report_generation_started trigger=manual user_id=%s", user.id)
         try:
-            report = await self._generate_global_report()
+            bundle = await self._generate_global_report_bundle()
         except asyncio.TimeoutError:
             LOGGER.warning("report_generation_failed trigger=manual reason=timeout user_id=%s", user.id)
             await self._finish_progress(update, progress, "报告生成超时，请稍后重试。")
@@ -311,11 +384,20 @@ class MiniHermesBot:
             )
             return
         try:
+            await self.memory.save_market_report(bundle.report_date, bundle.full)
+            report_saved = True
+        except Exception:  # noqa: BLE001 - detail storage must not block the brief
+            LOGGER.exception(
+                "report_history_save_failed trigger=manual date=%s", bundle.report_date
+            )
+            report_saved = False
+        try:
             message_ids = await self._deliver_report(
                 self.application.bot,
                 chat.id,
-                report,
+                bundle.brief,
                 progress=progress,
+                reply_markup=self._full_report_markup(bundle) if report_saved else None,
             )
         except ReportDeliveryError as exc:
             LOGGER.exception(
@@ -341,9 +423,93 @@ class MiniHermesBot:
             user.id,
             chat.id,
             message_ids,
-            len(report),
+            len(bundle.brief),
             time.monotonic() - started,
         )
+
+    async def full_report_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        user = update.effective_user
+        chat = update.effective_chat
+        if query is None or user is None or chat is None:
+            return
+        if user.id not in self.settings.allowed_user_ids:
+            try:
+                await query.answer("未授权", show_alert=True)
+            except Exception:  # noqa: BLE001 - authorization still fails closed
+                LOGGER.warning("report_callback_answer_failed authorized=false user_id=%s", user.id)
+            return
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001 - still try to deliver the requested detail
+            LOGGER.warning("report_callback_answer_failed authorized=true user_id=%s", user.id)
+        match = FULL_REPORT_CALLBACK.fullmatch(query.data or "")
+        if match is None:
+            return
+        report_id = match.group(1)
+        try:
+            await self._touch(update)
+            report = await self.memory.market_report_detail(report_id)
+        except Exception:  # noqa: BLE001 - keep callback responsive on storage errors
+            LOGGER.exception("report_callback_storage_failed user_id=%s", user.id)
+            try:
+                await self._reply_to_callback(
+                    query,
+                    context.bot,
+                    chat.id,
+                    "完整数据暂时无法读取，请稍后再点一次。",
+                )
+            except Exception:  # noqa: BLE001 - nothing else can be delivered
+                LOGGER.exception("report_callback_error_notice_failed user_id=%s", user.id)
+            return
+        if report is None or sha256(report.encode("utf-8")).hexdigest()[:32] != report_id:
+            await self._reply_to_callback(
+                query,
+                context.bot,
+                chat.id,
+                "这份完整数据已过期，请发送 /report 重新生成。",
+            )
+            return
+        try:
+            await self._deliver_report(context.bot, chat.id, report)
+        except ReportDeliveryError:
+            LOGGER.exception("report_callback_delivery_partial user_id=%s", user.id)
+            await self._reply_to_callback(
+                query,
+                context.bot,
+                chat.id,
+                "完整数据只发送了一部分，请稍后再点一次。",
+            )
+        except Exception:  # noqa: BLE001 - keep callback handler alive
+            LOGGER.exception("report_callback_delivery_failed user_id=%s", user.id)
+            await self._reply_to_callback(
+                query,
+                context.bot,
+                chat.id,
+                "完整数据发送失败，请稍后再点一次。",
+            )
+
+    async def _run_weekly_report(self, update: Update) -> None:
+        if not await self._authorized(update):
+            return
+        user, chat = update.effective_user, update.effective_chat
+        message = update.effective_message
+        if user is None or chat is None or message is None:
+            return
+        progress = await message.reply_text("⏳ 正在汇总本周海外市场，请稍候…")
+        try:
+            report = await self._generate_weekly_report()
+            await self._deliver_report(
+                self.application.bot,
+                chat.id,
+                report,
+                progress=progress,
+            )
+        except Exception:  # noqa: BLE001 - keep Telegram handler alive
+            LOGGER.exception("weekly_report_failed trigger=manual user_id=%s", user.id)
+            await self._finish_progress(update, progress, "周报暂时不可用，请稍后重试。")
 
     async def _run_pi(self, update: Update, prompt: str) -> None:
         if not await self._authorized(update):
@@ -415,11 +581,12 @@ class MiniHermesBot:
             "/stock 600875 — 个股研究\n"
             "/market — A 股市场概览\n"
             "/report — 立即生成海外市场晨报\n"
+            "/weekly — 查看本周海外市场简报\n"
             "/watch add 600875 — 添加自选\n"
             "/watch remove 600875 — 删除自选\n"
             "/watch list — 查看自选\n"
             "/style 稳健中线 — 设置投资风格\n"
-            "/subscribe — 订阅 08:30 晨报\n"
+            "/subscribe — 订阅 08:30 晨报和周六 09:00 周报\n"
             "/unsubscribe — 取消晨报\n"
             "/status — 节点状态\n\n"
             "pi 完整交互（普通消息默认进入 pi）：\n"
@@ -513,6 +680,9 @@ class MiniHermesBot:
     async def report_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_report(update)
 
+    async def weekly_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_weekly_report(update)
+
     async def watch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorized(update):
             return
@@ -557,7 +727,7 @@ class MiniHermesBot:
         await self._reply(
             update,
             f"已订阅美股交易日收盘后的 {self.settings.daily_report_time} 海外市场晨报"
-            "（上海时间通常为周二至周六）。",
+            "（上海时间通常为周二至周六），以及周六 09:00 周报。",
         )
 
     async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -641,21 +811,32 @@ class MiniHermesBot:
             len(recipients),
         )
         try:
-            report = await self._generate_global_report()
+            bundle = await self._generate_global_report_bundle()
         except Exception:  # noqa: BLE001 - one failed run must not stop the scheduler
             LOGGER.exception("report_generation_failed trigger=scheduled date=%s", now.date())
             return
+        try:
+            await self.memory.save_market_report(bundle.report_date, bundle.full)
+            report_saved = True
+        except Exception:  # noqa: BLE001 - history failure must not block delivery
+            LOGGER.exception("report_history_save_failed date=%s", now.date())
+            report_saved = False
 
         for user_id, chat_id in recipients:
             try:
-                message_ids = await self._deliver_report(context.bot, chat_id, report)
+                message_ids = await self._deliver_report(
+                    context.bot,
+                    chat_id,
+                    bundle.brief,
+                    reply_markup=self._full_report_markup(bundle) if report_saved else None,
+                )
                 LOGGER.info(
                     "report_delivery_succeeded trigger=scheduled user_id=%s chat_id=%s "
                     "message_ids=%s chars=%s",
                     user_id,
                     chat_id,
                     message_ids,
-                    len(report),
+                    len(bundle.brief),
                 )
             except ReportDeliveryError as exc:
                 LOGGER.exception(
@@ -668,6 +849,42 @@ class MiniHermesBot:
             except Exception:  # noqa: BLE001 - one subscriber must not block others
                 LOGGER.exception(
                     "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s",
+                    user_id,
+                    chat_id,
+                )
+
+    async def weekly_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        now = datetime.now(ZoneInfo(self.settings.timezone))
+        if now.weekday() != 5:
+            return
+        subscriptions = await self.memory.subscriptions()
+        recipients = [
+            (user_id, chat_id)
+            for user_id, chat_id in subscriptions
+            if user_id in self.settings.allowed_user_ids
+        ]
+        if not recipients:
+            LOGGER.info("weekly_report_skipped reason=no_allowed_recipients date=%s", now.date())
+            return
+        try:
+            report = await self._generate_weekly_report()
+        except Exception:  # noqa: BLE001 - scheduler must stay alive
+            LOGGER.exception("weekly_report_generation_failed date=%s", now.date())
+            return
+        for user_id, chat_id in recipients:
+            try:
+                message_ids = await self._deliver_report(context.bot, chat_id, report)
+                LOGGER.info(
+                    "weekly_report_delivery_succeeded user_id=%s chat_id=%s "
+                    "message_ids=%s chars=%s",
+                    user_id,
+                    chat_id,
+                    message_ids,
+                    len(report),
+                )
+            except Exception:  # noqa: BLE001 - one subscriber must not block others
+                LOGGER.exception(
+                    "weekly_report_delivery_failed user_id=%s chat_id=%s",
                     user_id,
                     chat_id,
                 )

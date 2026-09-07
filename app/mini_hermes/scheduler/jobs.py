@@ -10,3 +10,4 @@ def parse_daily_time(value: str, timezone: str) -> time:
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ValueError("DAILY_REPORT_TIME must be HH:MM")
     return time(hour=hour, minute=minute, tzinfo=ZoneInfo(timezone))
+
