@@ -1,0 +1,13 @@
+target-version = "py311"
+line-length = 100
+
+[lint]
+# Focused rule set: correctness / obvious bugs, not full style rewrite.
+select = [
+  "E9",   # runtime syntax
+  "F63",  # invalid print
+  "F7",   # syntax errors
+  "F82",  # undefined names
+  "F401", # unused import
+  "F841", # unused variable
+]

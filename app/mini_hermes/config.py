@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
+
+_LOGGER = logging.getLogger(__name__)
+_report_model_warned = False
 
 
 def load_env_file(path: Path) -> None:
@@ -27,6 +31,21 @@ def _int_set(value: str) -> frozenset[int]:
     return frozenset(int(item.strip()) for item in value.split(",") if item.strip())
 
 
+def _warn_orphan_report_model() -> None:
+    """REPORT_MODEL is unused (reports are deterministic); warn once if present."""
+    global _report_model_warned
+    if _report_model_warned:
+        return
+    if "REPORT_MODEL" not in os.environ:
+        return
+    _report_model_warned = True
+    _LOGGER.warning(
+        "REPORT_MODEL is set in the environment but unused; "
+        "overseas reports are deterministic and do not call a model. "
+        "Safe to remove from .env."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     telegram_token: str
@@ -47,6 +66,7 @@ class Settings:
     def from_env(cls, env_file: Path | None = None) -> "Settings":
         if env_file is not None:
             load_env_file(env_file)
+        _warn_orphan_report_model()
         return cls(
             telegram_token=os.getenv("TELEGRAM_TOKEN", "").strip(),
             allowed_user_ids=_int_set(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")),
