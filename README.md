@@ -44,6 +44,10 @@ pi 以独立的 `pi-channel` 系统用户运行，拥有完整的编码 Agent �
 Token、Mini Hermes `.env` 和 `/root` 不对 pi channel 开放。远程执行仅允许白名单
 用户在 Bot 私聊中触发，群聊请求会被拒绝。
 
+## 配置备注
+
+`REPORT_MODEL` 不是有效 Settings 键（晨报不调用模型）；可从生产 `.env` 删除。详见 `.env.example`。
+
 ## 安全默认值
 
 `.env` 中未配置 `TELEGRAM_ALLOWED_USER_IDS` 时，Bot 只响应 `/start` 和

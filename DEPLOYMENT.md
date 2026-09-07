@@ -81,3 +81,10 @@ cp deploy/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl restart mini-hermes-pi mini-hermes
 ```
+
+## Telegram 网络与错误日志
+
+`python-telegram-bot` Application 已设置 connect/read/write/pool 超时；长轮询
+`getUpdates` 的瞬时网络错误由 PTB 自身重试。业务 `error_handler` 对
+`NetworkError` / `TimedOut` / `RetryAfter`（及 httpx Read/Connect）按类型限流：
+默认同一错误类最多每 5 分钟打一次完整堆栈，其余为单行 WARNING，避免 journal 被刷爆。

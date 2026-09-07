@@ -100,7 +100,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             treasury=None,
         )
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.bot.datetime") as clock:
             clock.now.return_value = datetime(
                 2026,
                 8,
@@ -124,18 +124,18 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "mini_hermes.gateway.telegram.fetch_overseas_snapshot",
+                "mini_hermes.gateway.telegram.bot.fetch_overseas_snapshot",
                 new=AsyncMock(return_value=snapshot),
             ) as fetch_snapshot,
             patch(
-                "mini_hermes.gateway.telegram.compose_global_report_bundle",
+                "mini_hermes.gateway.telegram.bot.compose_global_report_bundle",
                 return_value=GlobalReportBundle(
                     report_date="2026-08-06",
                     brief="brief report",
                     full="overseas report",
                 ),
             ) as compose,
-            patch("mini_hermes.gateway.telegram.datetime") as clock,
+            patch("mini_hermes.gateway.telegram.bot.datetime") as clock,
         ):
             clock.now.return_value = datetime(
                 2026,
@@ -234,7 +234,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 8, 8, 30)
             await bot.daily_report_job(context)
 
@@ -274,7 +274,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         context = SimpleNamespace(bot=object())
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 4, 8, 30)
             await bot.daily_report_job(context)
 
@@ -391,7 +391,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot._deliver_report = AsyncMock(side_effect=[[201], [202]])
         context = SimpleNamespace(bot=object())
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 8, 9, 0)
             await bot.weekly_report_job(context)
 
@@ -400,7 +400,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         bot.memory.subscriptions.reset_mock()
         bot._generate_weekly_report.reset_mock()
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 9, 9, 0)
             await bot.weekly_report_job(context)
 
@@ -419,7 +419,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot._generate_global_report_bundle = AsyncMock()
         context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 4, 8, 30)
             await bot.daily_report_job(context)
 
@@ -435,14 +435,14 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot.memory = SimpleNamespace(subscriptions=AsyncMock())
         context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 2, 8, 30)
             await bot.daily_report_job(context)
 
         bot.memory.subscriptions.assert_not_awaited()
         context.bot.send_message.assert_not_awaited()
 
-        with patch("mini_hermes.gateway.telegram.datetime") as clock:
+        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
             clock.now.return_value = datetime(2026, 8, 3, 8, 30)
             await bot.daily_report_job(context)
 
