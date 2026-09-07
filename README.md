@@ -60,7 +60,14 @@ tail -f /var/log/mini-hermes/mini-hermes.log
 /opt/mini-hermes/.venv/bin/python -m mini_hermes --self-test
 ```
 
-服务配置文件为 `/opt/mini-hermes/.env`。修改后执行：
+更新代码后先跑部署闸门，再重启（详见 `DEPLOYMENT.md`）：
+
+```bash
+./deploy/pre-restart-gate.sh
+systemctl restart mini-hermes-pi mini-hermes
+```
+
+服务配置文件为 `/opt/mini-hermes/.env`。只改配置时可：
 
 ```bash
 systemctl restart mini-hermes
