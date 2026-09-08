@@ -95,6 +95,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         self._register_handlers()
 
     def _register_handlers(self) -> None:
+        from mini_hermes.gateway.telegram.thinking import THINKING_CALLBACK
         commands: list[tuple[str, Callable[..., Awaitable[None]]]] = [
             ("start", self.start_command),
             ("help", self.help_command),
@@ -113,6 +114,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
             ("new", self.new_pi_session_command),
             ("abort", self.abort_pi_command),
             ("pistatus", self.pi_status_command),
+            ("thinking", self.thinking_command),
         ]
         for name, callback in commands:
             background = name in {"stock", "market", "report", "weekly", "pi"}
@@ -120,6 +122,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
                 name, bounded_background(self, callback) if background else callback,
                 block=not background,
             ))
+        self.application.add_handler(CallbackQueryHandler(self.thinking_callback, pattern=THINKING_CALLBACK))
         self.application.add_handler(
             CallbackQueryHandler(
                 self.full_report_callback,
@@ -185,6 +188,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
                 BotCommand("new", "新建 pi 会话"),
                 BotCommand("abort", "中止当前 pi 任务"),
                 BotCommand("pistatus", "当前模型和任务状态"),
+                BotCommand("thinking", "切换聊天和 A 股分析的思考强度"),
                 BotCommand("whoami", "显示 Telegram 用户 ID"),
             ]
         )
@@ -402,6 +406,18 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         message = update.effective_message
         if message is None:
             return
+        # Snapshot once before any progress/network wait. A later preference
+        # change cannot alter this request, including while queued at the broker.
+        try:
+            from mini_hermes.thinking import validate_thinking
+            thinking = validate_thinking(await self.memory.get_thinking(user.id, "chat"))
+        except Exception:
+            notice = "思考强度设置暂时无法读取，本次未启动模型。请稍后重试。"
+            if progress is None:
+                await self._reply(update, notice)
+            else:
+                await self._finish_progress(update, progress, notice)
+            return
         if progress is None:
             progress = await message.reply_text("⏳ 已接收，正在连接助手…\n/abort 可中止当前 pi 任务")
         started = time.monotonic()
@@ -425,10 +441,10 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         try:
             if attachments:
                 response = await self.pi_channel.prompt(
-                    user.id, prompt, tracker.update, attachments=attachments
+                    user.id, prompt, tracker.update, attachments=attachments, thinking=thinking
                 )
             else:
-                response = await self.pi_channel.prompt(user.id, prompt, tracker.update)
+                response = await self.pi_channel.prompt(user.id, prompt, tracker.update, thinking=thinking)
             if not isinstance(response, str) or not response.strip():
                 raise PiChannelError(code="invalid_response")
             outcome, error_code = "success", "none"

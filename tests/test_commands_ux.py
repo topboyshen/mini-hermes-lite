@@ -71,10 +71,10 @@ class StatusFormattingTests(unittest.TestCase):
             result = format_pi_status({"busy": False, "research_active": count})
             self.assertIn("模型通道：请求状态暂未确认", result)
 
-    def test_menu_contains_only_four_text_actions(self):
+    def test_menu_contains_five_text_actions(self):
         markup = feature_menu_markup()
         self.assertEqual(tuple(button.text for row in markup.keyboard for button in row), FEATURE_MENU_TEXTS)
-        self.assertEqual(tuple(len(row) for row in markup.keyboard), (2, 2))
+        self.assertEqual(tuple(len(row) for row in markup.keyboard), (2, 2, 1))
         self.assertTrue(markup.resize_keyboard)
         for row in markup.keyboard:
             for button in row:

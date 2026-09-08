@@ -13,7 +13,7 @@ class PiGatewayFailureTests(unittest.IsolatedAsyncioTestCase):
         bot = object.__new__(MiniHermesBot)
         bot._authorized = AsyncMock(return_value=True)
         bot._finish_progress = AsyncMock()
-        bot.memory = SimpleNamespace(append_turn=AsyncMock())
+        bot.memory = SimpleNamespace(append_turn=AsyncMock(), get_thinking=AsyncMock(return_value="low"))
         bot.pi_channel = SimpleNamespace(prompt=AsyncMock(return_value=answer, side_effect=error))
         bot.application = SimpleNamespace(bot=SimpleNamespace(send_chat_action=AsyncMock()))
         progress = SimpleNamespace(edit_text=AsyncMock())

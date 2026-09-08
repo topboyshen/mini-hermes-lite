@@ -69,8 +69,12 @@ MCP，不能当作完全只读/离线检查。
 pi broker。重启后验证 socket、模型固定值、服务状态及部署检查；真实附件效果
 需用户在 Telegram 发一份非敏感样例确认，不应伪造成功记录。
 
-Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.6`、
-`PI_CHANNEL_THINKING=low`。当前 Python 适配器依照已锁定的 PydanticAI 2.22.0
+Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.6`。
+`PI_CHANNEL_THINKING=low` 保留为服务默认及历史维护档位；Telegram 两类任务
+通过 `/thinking` 独立选择四个允许档位，无需改 unit、模型基线或 OAuth。
+启动时幂等新增 `thinking_preferences` 表；不改旧表或聊天记录。旧版本忽略该表，
+回退源码不应删除已保存的偏好。菜单/主 Bot/模型中继需要成套上线。
+当前 Python 适配器依照已锁定的 PydanticAI 2.22.0
 消息接口实现；升级依赖后必须重跑多轮工具/签名回放测试。
 
 离线回归（不读真实聊天，不调用模型、不发送 Telegram）：
@@ -79,6 +83,9 @@ Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=app .venv/bin/python -m unittest discover -s tests -v
 node --test tests/test_research_completion.mjs
 ```
+
+在上述网络隔离候选中，额外运行 `tests/test_pi_cli_attachments.mjs`，校验已安装
+pi 的四档 CLI 解析和 Grok 4.6 映射；该原生测试拒绝在未隔离环境中运行。
 
 部署时先验收候选，再同步代码，把生产 `.env` 的 `MODEL` 改为 `pi:grok-4.6`，
 确认无正在执行的研究/聊天后重启 `mini-hermes-pi` 和 `mini-hermes`。

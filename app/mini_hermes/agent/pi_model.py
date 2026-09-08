@@ -24,6 +24,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
 from mini_hermes.pi_channel.client import PiChannelClient, PiChannelError
+from mini_hermes.thinking import DEFAULT_THINKING, validate_thinking
 
 
 _NATIVE_ASSISTANT = "pi_native_assistant"
@@ -84,8 +85,12 @@ class PiResearchModel(Model):
         ):
             raise UserError("Research model supports only text output and function tools")
         values = settings or {}
-        if set(values) - {"max_tokens", "timeout"}:
+        if set(values) - {"max_tokens", "timeout", "pi_thinking"}:
             raise UserError("Unsupported research model settings")
+        try:
+            validate_thinking(values.get("pi_thinking", DEFAULT_THINKING))
+        except ValueError:
+            raise UserError("Unsupported research thinking level") from None
         max_tokens = values.get("max_tokens", 4096)
         if (
             isinstance(max_tokens, bool)
@@ -283,6 +288,7 @@ class PiResearchModel(Model):
         settings, params = self.prepare_request(model_settings, model_request_parameters)
         self._request_options(settings, params)
         payload = self._map_request(messages, params, max_tokens)
+        payload["thinking"] = validate_thinking((model_settings or {}).get("pi_thinking", DEFAULT_THINKING))
         try:
             async with asyncio.timeout(timeout):
                 raw = await self._client.research_completion(payload)

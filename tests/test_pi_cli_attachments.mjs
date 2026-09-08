@@ -143,6 +143,16 @@ test("installed Grok supports image and synthetic OAuth preserves its API route"
   assert.equal(auth.baseUrl, undefined);
 });
 
+test("installed pi parses all four menu efforts supported by Grok 4.6", () => {
+  for (const level of ["low", "medium", "high", "xhigh"]) {
+    const parsed = parseArgs(["--offline", "--mode", "json", "--model", "xai/grok-4.6",
+      "--thinking", level, "-p", "--", "synthetic"]);
+    assert.equal(parsed.thinking, level);
+    assert.equal(grok.thinkingLevelMap[level], level);
+    assert.equal(grok.reasoning, true);
+  }
+});
+
 for (const extension of ["png", "jpg", "webp"]) {
   test(`native CLI ingests and Responses preserves ${extension} image`, async () => {
     const fixture = images.find((entry) => entry.extension === extension);

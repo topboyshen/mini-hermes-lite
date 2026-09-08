@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from telegram import ReplyKeyboardMarkup, Update
 
 from mini_hermes.gateway.telegram.delivery import ReportDeliveryError
+from mini_hermes.gateway.telegram.thinking import ThinkingMenuMixin
 from mini_hermes.gateway.telegram.routing import (
     FULL_REPORT_CALLBACK,
     STOCK_CODE,
@@ -16,13 +17,13 @@ from mini_hermes.monitor import system_status
 from mini_hermes.pi_channel import PiChannelError
 
 LOGGER = logging.getLogger(__name__)
-FEATURE_MENU_TEXTS = ("功能帮助", "任务状态", "海外晨报", "本周简报")
+FEATURE_MENU_TEXTS = ("功能帮助", "任务状态", "海外晨报", "本周简报", "思考强度")
 
 
 def feature_menu_markup() -> ReplyKeyboardMarkup:
     """Text-only private-chat shortcuts; no URLs or state-changing actions."""
     return ReplyKeyboardMarkup(
-        [list(FEATURE_MENU_TEXTS[:2]), list(FEATURE_MENU_TEXTS[2:])],
+        [list(FEATURE_MENU_TEXTS[:2]), list(FEATURE_MENU_TEXTS[2:4]), [FEATURE_MENU_TEXTS[4]]],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="直接发问题，或选择下方功能",
@@ -79,7 +80,7 @@ def format_pi_status(value: object) -> str:
                       activity, research_line, "", next_step))
 
 
-class CommandsMixin:
+class CommandsMixin(ThinkingMenuMixin):
     """Telegram command and callback handlers."""
 
     async def _private_feature_authorized(self, update: Update, *, onboarding: bool = False) -> bool:
@@ -114,6 +115,7 @@ class CommandsMixin:
             "任务状态": self.pi_status_command,
             "海外晨报": self.report_command,
             "本周简报": self.weekly_command,
+            "思考强度": self.thinking_command,
         }
         await handlers[message.text](update, context)
 
@@ -226,6 +228,7 @@ class CommandsMixin:
             "/new — 开始新的 pi 对话\n"
             "/status — 查看服务器概况\n\n"
             "按需设置，不会因打开菜单而修改\n"
+            "/thinking — 分别选择聊天和 A 股分析的思考强度\n"
             "/watch list — 查看自选\n"
             "/watch add 600875 / /watch remove 600875 — 增删自选\n"
             "/style 稳健中线 — 保存偏好\n"

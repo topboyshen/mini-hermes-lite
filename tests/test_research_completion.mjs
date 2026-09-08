@@ -69,10 +69,28 @@ test('successful replies omit raw diagnostics while preserving replay signatures
   assert.ok(native.diagnostics,'upstream message is not mutated');
 });
 
-test('model and thinking environment fail closed before runtime loads', async () => {
-  for (const wrongEnv of [{},{...env,PI_CHANNEL_MODEL:'xai/grok-4.5'},{...env,PI_CHANNEL_THINKING:'high'}]) {
+test('model environment fails closed before runtime loads', async () => {
+  for (const wrongEnv of [{},{...env,PI_CHANNEL_MODEL:'xai/grok-4.5'}]) {
     const result=await completeResearch(request(),{env:wrongEnv,loadRuntime:()=>{throw new Error('must not load');}});
     assert.equal(result.error_code,'model_unavailable');
+  }
+});
+
+test('all four request levels reach native runtime independent of chat default', async () => {
+  for (const thinking of ['low','medium','high','xhigh']) {
+    const input = {...request(),thinking};
+    const result = await completeResearch(input, {env:{...env,PI_CHANNEL_THINKING:'medium'},
+      loadRuntime:mock(assistant(), (_m,_c,options)=>assert.equal(options.reasoning,thinking))});
+    assert.equal(result.ok,true);
+    assert.equal(input.thinking,thinking);
+  }
+});
+
+test('invalid thinking levels fail before runtime or credential access', async () => {
+  for (const thinking of ['off','minimal','max','HIGH','high --tool bash',null,1,true,[],{}]) {
+    const result = await completeResearch({...request(),thinking}, {env,
+      loadRuntime:()=>{throw new Error('must not load');}});
+    assert.deepEqual(result,{ok:false,error_code:'invalid_request'});
   }
 });
 

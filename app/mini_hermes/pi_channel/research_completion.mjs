@@ -8,6 +8,7 @@ export const DEADLINE_MS = 120_000;
 const MODEL = 'grok-4.6';
 const PROVIDER = 'xai';
 const API = 'openai-responses';
+const THINKING_LEVELS = new Set(['low', 'medium', 'high', 'xhigh']);
 const PI_ROOT = '/usr/lib/node_modules/@earendil-works/pi-coding-agent';
 const AUTH_PATH = '/var/lib/mini-hermes-pi/agent/auth.json';
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -84,7 +85,9 @@ function validateAssistant(message) {
 }
 
 export function validateRequest(input) {
-  keys(input, ['systemPrompt', 'messages', 'tools', 'maxTokens']);
+  keys(input, ['systemPrompt', 'messages', 'tools', 'maxTokens', 'thinking']);
+  const thinking = input.thinking === undefined ? 'low' : input.thinking;
+  demand(typeof thinking === 'string' && THINKING_LEVELS.has(thinking));
   demand(Buffer.byteLength(JSON.stringify(input), 'utf8') <= MAX_BYTES);
   if (input.systemPrompt !== undefined) demand(text(input.systemPrompt, 64 * 1024));
   demand(Array.isArray(input.messages) && input.messages.length >= 1 && input.messages.length <= 128);
@@ -140,7 +143,7 @@ export function validateRequest(input) {
   demand(calls.size === completed.size);
   const maxTokens = input.maxTokens === undefined ? 4096 : input.maxTokens;
   demand(Number.isInteger(maxTokens) && maxTokens >= 1 && maxTokens <= 8192);
-  return { context: {systemPrompt: input.systemPrompt ?? '', messages: input.messages, tools}, maxTokens };
+  return { context: {systemPrompt: input.systemPrompt ?? '', messages: input.messages, tools}, maxTokens, thinking };
 }
 
 export function classifyError(error) {
@@ -167,7 +170,7 @@ export async function completeResearch(input, {
   let request;
   try { request = validateRequest(input); }
   catch { return {ok: false, error_code: 'invalid_request'}; }
-  if (env.PI_CHANNEL_MODEL !== `${PROVIDER}/${MODEL}` || env.PI_CHANNEL_THINKING !== 'low') {
+  if (env.PI_CHANNEL_MODEL !== `${PROVIDER}/${MODEL}`) {
     return {ok: false, error_code: 'model_unavailable'};
   }
   const controller = new AbortController();
@@ -193,7 +196,7 @@ export async function completeResearch(input, {
         return {ok: false, error_code: 'model_unavailable'};
       }
       const message = await runtime.completeSimple(model, request.context, {
-        reasoning: 'low', maxTokens: request.maxTokens, maxRetries: 0,
+        reasoning: request.thinking, maxTokens: request.maxTokens, maxRetries: 0,
         timeoutMs, signal: controller.signal,
       });
       if (controller.signal.aborted || message?.stopReason === 'aborted') {

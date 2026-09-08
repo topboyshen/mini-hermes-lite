@@ -13,6 +13,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from mini_hermes.config import Settings
 from mini_hermes.memory import MemoryStore
+from mini_hermes.thinking import validate_thinking
 
 
 LOGGER = logging.getLogger(__name__)
@@ -104,6 +105,12 @@ class AgentService:
     async def run(self, user_id: int, prompt: str) -> str:
         if not self._started:
             raise RuntimeError("Agent is not started")
+        # Per-run settings flow through every model/tool turn. Do not mutate the
+        # shared Agent or reread preferences midway through an active research task.
+        run_options = {}
+        if self.settings.model == "pi:grok-4.6":
+            level = validate_thinking(await self.memory.get_thinking(user_id, "research"))
+            run_options["model_settings"] = {"pi_thinking": level}
         history = await self.memory.recent_messages(
             user_id, self.settings.max_history_messages, channel="hermes"
         )
@@ -124,7 +131,7 @@ class AgentService:
 
         async with self._semaphore:
             result = await asyncio.wait_for(
-                self._agent.run(full_prompt),
+                self._agent.run(full_prompt, **run_options),
                 timeout=self.settings.agent_timeout_seconds,
             )
         output = str(result.output).strip()

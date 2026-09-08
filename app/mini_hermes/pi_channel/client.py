@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 from .attachments import validate_attachments
 from .errors import classify_pi_failure, error_message, normalize_error_code
+from mini_hermes.thinking import validate_thinking
 
 ProgressCallback = Callable[[str], Awaitable[None]]
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
@@ -89,8 +90,14 @@ class PiChannelClient:
         on_progress: ProgressCallback | None = None,
         *,
         attachments: list[dict[str, str]] | None = None,
+        thinking: str | None = None,
     ) -> str:
         payload: dict[str, object] = {"action": "prompt", "user_id": user_id, "message": message}
+        if thinking is not None:
+            try:
+                payload["thinking"] = validate_thinking(thinking)
+            except ValueError:
+                raise PiChannelError(code="invalid_request") from None
         if attachments is not None:
             try:
                 payload["attachments"] = validate_attachments(attachments)

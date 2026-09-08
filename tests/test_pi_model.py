@@ -70,7 +70,8 @@ class PiResearchModelTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = await self.request()
         payload = self.completion.await_args.args[0]
-        self.assertEqual(set(payload), {"systemPrompt", "messages", "tools", "maxTokens"})
+        self.assertEqual(set(payload), {"systemPrompt", "messages", "tools", "maxTokens", "thinking"})
+        self.assertEqual(payload["thinking"], "low")
         self.assertEqual(payload["maxTokens"], 4096)
         self.assertEqual(result.model_name, "grok-4.6")
         self.assertEqual(result.provider_name, "xai")
@@ -90,10 +91,11 @@ class PiResearchModelTests(unittest.IsolatedAsyncioTestCase):
             return "synthetic quote"
 
         agent = Agent(self.model, instructions="synthetic system instruction", tools=[local_quote])
-        result = await agent.run("synthetic question")
+        result = await agent.run("synthetic question", model_settings={"pi_thinking": "xhigh"})
         self.assertEqual(result.output, "synthetic final")
         self.assertEqual(executed, ["600875"])
         self.assertEqual(self.completion.await_count, 2)
+        self.assertEqual([call.args[0]["thinking"] for call in self.completion.await_args_list], ["xhigh", "xhigh"])
         payload = self.completion.await_args.args[0]
         self.assertIn("synthetic system instruction", payload["systemPrompt"])
         self.assertEqual(payload["tools"][0]["name"], "local_quote")
@@ -168,6 +170,7 @@ class PiResearchModelTests(unittest.IsolatedAsyncioTestCase):
             {"max_tokens": 0}, {"max_tokens": 8193}, {"max_tokens": True},
             {"temperature": 0.5}, {"thinking": "low"}, {"timeout": 121},
             {"timeout": -1}, {"extra_headers": {"Authorization": "synthetic"}},
+            {"pi_thinking": "off"}, {"pi_thinking": "max"}, {"pi_thinking": None}, {"pi_thinking": []},
         ):
             with self.subTest(settings=settings), self.assertRaises(UserError):
                 await self.request(settings=settings)

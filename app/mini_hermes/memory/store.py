@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 import sqlite3
 
+from mini_hermes.thinking import DEFAULT_THINKING, validate_scope, validate_thinking
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -44,6 +46,14 @@ class MemoryStore:
                 symbol TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, symbol),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS thinking_preferences (
+                user_id INTEGER NOT NULL,
+                scope TEXT NOT NULL CHECK (scope IN ('chat', 'research')),
+                level TEXT NOT NULL CHECK (level IN ('low', 'medium', 'high', 'xhigh')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, scope),
                 FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS conversations (
@@ -140,6 +150,28 @@ class MemoryStore:
             )
             self._db().commit()
             return cursor.rowcount > 0
+
+    async def get_thinking(self, user_id: int, scope: str) -> str:
+        validate_scope(scope)
+        async with self._lock:
+            row = self._db().execute(
+                "SELECT level FROM thinking_preferences WHERE user_id=? AND scope=?",
+                (user_id, scope),
+            ).fetchone()
+            return validate_thinking(row["level"]) if row else DEFAULT_THINKING
+
+    async def set_thinking(self, user_id: int, scope: str, level: str) -> None:
+        validate_scope(scope)
+        validate_thinking(level)
+        async with self._lock:
+            # Only this preference changes; no provider, history or subscription writes.
+            with self._db():
+                self._db().execute(
+                    """INSERT INTO thinking_preferences(user_id, scope, level, updated_at)
+                       VALUES (?, ?, ?, ?) ON CONFLICT(user_id, scope) DO UPDATE SET
+                       level=excluded.level, updated_at=excluded.updated_at""",
+                    (user_id, scope, level, _now()),
+                )
 
     async def remove_watch(self, user_id: int, symbol: str) -> bool:
         async with self._lock:

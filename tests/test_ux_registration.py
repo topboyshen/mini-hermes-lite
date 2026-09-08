@@ -28,13 +28,13 @@ class HandlerRegistrationTests(unittest.TestCase):
         commands = {next(iter(handler.commands)): handler for handler in handlers if isinstance(handler, CommandHandler)}
         for name in ("stock", "market", "report", "weekly", "pi"):
             self.assertFalse(commands[name].block, name)
-        for name in ("abort", "new", "help", "pistatus"):
+        for name in ("abort", "new", "help", "pistatus", "thinking"):
             self.assertTrue(commands[name].block, name)
         self.assertEqual(commands["abort"].callback, bot.abort_pi_command)
 
     def test_menu_matches_before_generic_text(self):
         bot, handlers = self.bot()
-        for label in ("功能帮助", "任务状态", "海外晨报", "本周简报"):
+        for label in ("功能帮助", "任务状态", "海外晨报", "本周简报", "思考强度"):
             update = self.update(text=label)
             matching = [handler for handler in handlers if isinstance(handler, MessageHandler) and handler.check_update(update)]
             self.assertEqual(matching[0].callback, bot._feature_menu_dispatch)
@@ -55,6 +55,7 @@ class HandlerRegistrationTests(unittest.TestCase):
         patterns = [handler.pattern.pattern for handler in handlers if isinstance(handler, CallbackQueryHandler)]
         self.assertIn(r"^sg:(ok|no):\d+$", patterns)
         self.assertTrue(any("market_full" in pattern for pattern in patterns))
+        self.assertTrue(any("think:v1:" in pattern for pattern in patterns))
 
 
 class MenuDispatchTests(unittest.IsolatedAsyncioTestCase):

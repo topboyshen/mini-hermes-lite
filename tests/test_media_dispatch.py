@@ -71,7 +71,8 @@ class ActualMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
 
         owner = object.__new__(MiniHermesBot)
         owner.settings = SimpleNamespace(allowed_user_ids={42} if allowed else set())
-        owner.memory = SimpleNamespace(touch_user=AsyncMock(), append_turn=AsyncMock())
+        owner.memory = SimpleNamespace(touch_user=AsyncMock(), append_turn=AsyncMock(),
+                                       get_thinking=AsyncMock(return_value="low"))
         owner.pi_channel = SimpleNamespace(prompt=AsyncMock(return_value="离线图片分析完成"))
         errors, sends, edits = [], [], []
         owner.error_handler = AsyncMock(side_effect=lambda update, context: errors.append(type(context.error).__name__))
