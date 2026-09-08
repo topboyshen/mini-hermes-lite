@@ -14,7 +14,6 @@ import uuid
 
 from mini_hermes.pi_channel.attachments import staged_attachments, validate_attachments
 from mini_hermes.pi_channel.client import MAX_MESSAGE_BYTES
-from mini_hermes.pi_channel.context_maintenance import ContextMaintenanceMixin
 from mini_hermes.pi_channel.errors import classify_pi_failure, error_message, normalize_error_code
 
 
@@ -56,7 +55,7 @@ def _tool_name(event: dict[str, object]) -> str:
     return "tool"
 
 
-class PiChannelBroker(ContextMaintenanceMixin):
+class PiChannelBroker:
     def __init__(self) -> None:
         self.socket_path = Path(os.getenv("PI_CHANNEL_SOCKET", "/run/mini-hermes-pi/pi.sock"))
         self.state_dir = Path(os.getenv("PI_CHANNEL_STATE_DIR", "/var/lib/mini-hermes-pi"))
@@ -269,11 +268,6 @@ class PiChannelBroker(ContextMaintenanceMixin):
         *, attachments: object = None,
     ) -> None:
         validated = validate_attachments([] if attachments is None else attachments)
-        self._cancel_requested = False
-        await self._maintain_context(user_id, writer)
-        if self._cancel_requested:
-            await self._send_failure(writer, 'cancelled')
-            return
         with staged_attachments(self.workspace, validated) as (paths, cleanup):
             await self._run_prompt_process(
                 user_id, message, writer, attachment_paths=paths, input_loaded=cleanup,
@@ -486,9 +480,7 @@ class PiChannelBroker(ContextMaintenanceMixin):
                     await self._stop_process()
                 await self._send(writer, {"type": "result", "ok": True, "aborted": aborted})
                 return
-            if action == "compact":
-                self._authorize_research(writer)
-            if action in {"new", "compact"} and self._lock.locked():
+            if action == "new" and self._lock.locked():
                 await self._send_failure(writer, "channel_busy")
                 return
             if action == "prompt" and self._lock.locked():
@@ -507,23 +499,6 @@ class PiChannelBroker(ContextMaintenanceMixin):
                             writer,
                             {"type": "result", "ok": True, "session": session.name},
                         )
-                        return
-                    if action == "compact":
-                        self._cancel_requested = False
-                        running = asyncio.create_task(self._maintain_context(user_id, writer, force=True))
-                        try:
-                            done, _pending = await asyncio.wait({running, disconnected}, return_when=asyncio.FIRST_COMPLETED)
-                            if disconnected in done:
-                                return
-                            result = await running
-                            if self._cancel_requested:
-                                await self._send_failure(writer, 'cancelled')
-                            else:
-                                await self._send(writer, {'type': 'result', 'ok': result['status'] != 'failed', **result})
-                        finally:
-                            if not running.done():
-                                running.cancel()
-                            await asyncio.gather(running, return_exceptions=True)
                         return
                     if action != "prompt":
                         raise ValueError("unsupported action")

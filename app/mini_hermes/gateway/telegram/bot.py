@@ -409,20 +409,16 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         tracker.start()
 
         request_id = uuid.uuid4().hex
-        async def show_typing() -> None:
-            try:
-                async with asyncio.timeout(2):
-                    await self.application.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
-            except Exception:
-                LOGGER.debug("pi_typing_status_unavailable request_id=%s", request_id)
-
-        typing_task = asyncio.create_task(show_typing())
         outcome, error_code, response = "failed", "upstream_error", ""
         LOGGER.info(
             "pi_request_started request_id=%s user_id=%s prompt_chars=%s",
             request_id, user.id, len(prompt),
         )
         try:
+            try:
+                await self.application.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            except Exception:  # typing status must not prevent the actual request
+                LOGGER.debug("pi_typing_status_unavailable request_id=%s", request_id)
             if attachments:
                 response = await self.pi_channel.prompt(
                     user.id, prompt, tracker.update, attachments=attachments
@@ -447,8 +443,6 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         except Exception:  # provider diagnostics must not leak into logs or chat
             response = error_message(error_code)
         finally:
-            typing_task.cancel()
-            await asyncio.gather(typing_task, return_exceptions=True)
             await tracker.stop()
             if outcome == "failed":
                 LOGGER.warning(

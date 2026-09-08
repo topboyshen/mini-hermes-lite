@@ -131,9 +131,7 @@ class ActualMediaDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.edits, ["离线图片分析完成"])
         result.get_file.assert_awaited_once()
         result.download.assert_awaited_once()
-        # A fully synchronous mocked model may finish before the best-effort
-        # typing task gets scheduled; typing is never on the critical path.
-        self.assertLessEqual(result.typing.await_count, 1)
+        result.typing.assert_awaited_once()
         result.owner.pi_channel.prompt.assert_awaited_once()
         args, kwargs = result.owner.pi_channel.prompt.await_args
         self.assertEqual(args[:2], (42, "概括这张测试图片"))

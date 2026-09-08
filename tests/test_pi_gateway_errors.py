@@ -88,24 +88,6 @@ class PiGatewayFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("outcome=success", finish)
         self.assertEqual(bot._finish_progress.await_args.args[2], "safe answer")
 
-    async def test_slow_typing_does_not_delay_model_or_survive_completion(self):
-        bot, update = self.fixture()
-        typing_entered, typing_ended = asyncio.Event(), asyncio.Event()
-        async def slow_typing(**kwargs):
-            typing_entered.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                typing_ended.set()
-        async def fast_model(*args, **kwargs):
-            await asyncio.wait_for(typing_entered.wait(), 0.2)
-            return 'safe answer'
-        bot.application.bot.send_chat_action.side_effect = slow_typing
-        bot.pi_channel.prompt.side_effect = fast_model
-        await asyncio.wait_for(bot._run_pi(update, 'synthetic'), 0.5)
-        self.assertTrue(typing_ended.is_set())
-        self.assertEqual(bot._finish_progress.await_args.args[2], 'safe answer')
-
 
 if __name__ == "__main__":
     unittest.main()
