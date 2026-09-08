@@ -29,6 +29,7 @@ ATTACHMENT_TYPES = {
 MEDIA_HELP = (
     "支持 JPG、PNG、WebP 图片（每张最多 1 MiB），以及 UTF-8 编码的 "
     "TXT、MD、CSV、JSON 文本（最多 128 KiB）。\n"
+    "iPhone 实况照片只分析静态画面，不处理动态部分。\n"
     "请一次发一个附件，可在说明中写上想问的问题。PDF、Office、压缩包和语音暂不支持。"
 )
 
@@ -89,6 +90,13 @@ class MediaMixin:
         chat, message = update.effective_chat, update.effective_message
         if chat is None or message is None:
             return
+        live_photo = getattr(message, "live_photo", None)
+        photos = getattr(message, "photo", None) or ()
+        document = getattr(message, "document", None)
+        media_kind = ("live_photo" if live_photo is not None else "photo" if photos
+                      else "document" if document is not None else "unsupported")
+        # Fixed categories only: never log captions, file IDs, names or URLs.
+        LOGGER.info("attachment_received kind=%s", media_kind)
         if chat.type != "private":
             await self._reply(update, "图片和文件分析只允许在机器人私聊中使用。")
             return
@@ -96,8 +104,17 @@ class MediaMixin:
             if self._album_notice_due(chat.id, message.media_group_id):
                 await self._reply(update, "暂不合并相册；请一次单独发送一张图片或一个文件。")
             return
-        photos = getattr(message, "photo", None) or ()
-        document = getattr(message, "document", None)
+        if live_photo is not None:
+            # LivePhoto.file_id is the VIDEO, not the still image. Only its
+            # nested PhotoSize variants may enter the existing image pipeline.
+            photos = getattr(live_photo, "photo", None) or ()
+            if not photos:
+                LOGGER.info("attachment_rejected reason=live_photo_without_still")
+                await self._reply(
+                    update, "收到了实况照片，但 Telegram 没有提供可分析的静态画面。"
+                    "请关闭 LIVE 后作为普通照片发送，或发送一张截图。"
+                )
+                return
         if photos:
             candidates = [photo for photo in photos if valid_size(photo.file_size, MAX_IMAGE_BYTES)]
             if not candidates:
@@ -123,7 +140,10 @@ class MediaMixin:
         else:
             await self._reply(update, MEDIA_HELP)
             return
-        progress = await message.reply_text("📎 正在接收并检查附件…")
+        progress = await message.reply_text(
+            "📎 收到实况照片，正在检查静态画面（不分析动态部分）…"
+            if live_photo is not None else "📎 正在接收并检查附件…"
+        )
         try:
             async with asyncio.timeout(45):
                 remote = await source.get_file()
@@ -149,6 +169,7 @@ class MediaMixin:
             LOGGER.warning("attachment_download_failed")
             await self._finish_progress(update, progress, "附件下载暂时失败，请稍后重新发送。")
             return
+        LOGGER.info("attachment_ready kind=%s", media_kind)
         caption = getattr(message, "caption", None)
         prompt = caption.strip() if isinstance(caption, str) else ""
         if not prompt:
@@ -156,5 +177,10 @@ class MediaMixin:
                 "请描述这张图片的主要内容，标明看不清或无法确定的部分。"
                 if mime_type.startswith("image/") else
                 "请用中文概括这份文本，列出要点、疑问和需要我核对的内容。"
+            )
+        if live_photo is not None:
+            prompt = (
+                "附件是实况照片的单张静态画面；没有提供动态视频。"
+                "请在回答中明确只分析了静态画面，不推测动作或声音。\n" + prompt
             )
         await self._run_pi(update, prompt, attachments=[attachment], progress=progress)

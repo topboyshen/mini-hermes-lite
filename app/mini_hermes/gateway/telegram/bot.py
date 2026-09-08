@@ -134,7 +134,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         )
         self.application.add_handler(
             MessageHandler(
-                filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO
+                filters.PHOTO | filters.LIVE_PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO
                 | filters.VIDEO | filters.ANIMATION | filters.Sticker.ALL,
                 bounded_background(self, self.media_message), block=False,
             )

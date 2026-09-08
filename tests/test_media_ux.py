@@ -143,6 +143,47 @@ class MediaIntakeTests(unittest.IsolatedAsyncioTestCase):
         await bot.media_message(update, None)
         source.get_file.assert_not_awaited()
 
+    async def test_live_photo_downloads_only_bounded_static_variant(self):
+        bot, update, source, _ = self.fixture(photo=True)
+        video = SimpleNamespace(photo=[source], file_size=20 * MAX_IMAGE_BYTES,
+                                get_file=AsyncMock())
+        oversized = SimpleNamespace(file_size=MAX_IMAGE_BYTES + 1, width=4000, height=3000,
+                                    get_file=AsyncMock())
+        video.photo.append(oversized)
+        update.effective_message.photo = []
+        update.effective_message.live_photo = video
+        with patch("mini_hermes.pi_channel.attachments.validate_attachments", return_value=[]):
+            with self.assertLogs("mini_hermes.gateway.telegram.media", level="INFO") as logs:
+                await bot.media_message(update, None)
+        source.get_file.assert_awaited_once()
+        video.get_file.assert_not_awaited()
+        oversized.get_file.assert_not_awaited()
+        self.assertIn("静态画面", update.effective_message.reply_text.await_args.args[0])
+        self.assertIn("没有提供动态视频", bot._run_pi.await_args.args[1])
+        self.assertIn("attachment_received kind=live_photo", " ".join(logs.output))
+        self.assertIn("attachment_ready kind=live_photo", " ".join(logs.output))
+        self.assertNotIn("请总结", " ".join(logs.output))
+
+    async def test_live_photo_missing_still_is_explained_without_video_download(self):
+        for photos in (None, []):
+            with self.subTest(photos=photos):
+                video = SimpleNamespace(photo=photos, get_file=AsyncMock())
+                bot, update, *_ = self.fixture(document=None, photo=False, live_photo=video)
+                await bot.media_message(update, None)
+                self.assertIn("没有提供", bot._reply.await_args.args[1])
+                video.get_file.assert_not_awaited()
+                bot._run_pi.assert_not_awaited()
+
+    async def test_live_photo_unknown_still_size_is_rejected_before_download(self):
+        bot, update, source, _ = self.fixture(photo=True)
+        source.file_size = None
+        update.effective_message.photo = []
+        update.effective_message.live_photo = SimpleNamespace(photo=[source])
+        await bot.media_message(update, None)
+        source.get_file.assert_not_awaited()
+        bot._run_pi.assert_not_awaited()
+        self.assertIn("大小未知", bot._reply.await_args.args[1])
+
     async def test_download_failure_does_not_leak_private_url(self):
         bot, update, source, _ = self.fixture()
         source.get_file.side_effect = RuntimeError("https://api.telegram.org/file/botSYNTHETIC_SECRET/private")
