@@ -47,7 +47,8 @@ class CallbackRegistrationTests(unittest.TestCase):
             for item in handlers
         ))
         self.assertTrue(any(
-            isinstance(item, MessageHandler) and item.callback == bot.text_message
+            isinstance(item, MessageHandler)
+            and getattr(item.callback, "__wrapped__", item.callback) == bot.text_message
             for item in handlers
         ))
         self.assertTrue(any(

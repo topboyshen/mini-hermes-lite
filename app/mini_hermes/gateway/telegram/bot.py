@@ -22,10 +22,13 @@ from telegram.ext import (
 
 from mini_hermes.agent import AgentService
 from mini_hermes.config import Settings
-from mini_hermes.gateway.telegram.commands import CommandsMixin
+from mini_hermes.gateway.telegram.background import bounded_background
+from mini_hermes.gateway.telegram.commands import CommandsMixin, FEATURE_MENU_TEXTS
 from mini_hermes.gateway.telegram.delivery import DeliveryMixin, ReportDeliveryError
 from mini_hermes.gateway.telegram.errors import log_handler_error
 from mini_hermes.gateway.telegram.jobs import JobsMixin
+from mini_hermes.gateway.telegram.media import MediaMixin
+from mini_hermes.gateway.telegram.progress import TaskProgress
 from mini_hermes.gateway.telegram.routing import FULL_REPORT_CALLBACK
 from mini_hermes.gateway.telegram.signal_gate_review_forward import signal_gate_review_callback
 from mini_hermes.memory import MemoryStore
@@ -50,7 +53,7 @@ _POOL_TIMEOUT = 5.0
 _GET_UPDATES_READ_TIMEOUT = 30.0
 
 
-class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
+class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.memory = MemoryStore(settings.database_path)
@@ -112,7 +115,11 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
             ("pistatus", self.pi_status_command),
         ]
         for name, callback in commands:
-            self.application.add_handler(CommandHandler(name, callback))
+            background = name in {"stock", "market", "report", "weekly", "pi"}
+            self.application.add_handler(CommandHandler(
+                name, bounded_background(self, callback) if background else callback,
+                block=not background,
+            ))
         self.application.add_handler(
             CallbackQueryHandler(
                 self.full_report_callback,
@@ -126,9 +133,35 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
             )
         )
         self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message)
+            MessageHandler(
+                filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO
+                | filters.VIDEO | filters.ANIMATION | filters.Sticker.ALL,
+                bounded_background(self, self.media_message), block=False,
+            )
+        )
+        self.attachments_enabled = True
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT & filters.Regex(
+                    re.compile("^(?:" + "|".join(re.escape(name) for name in FEATURE_MENU_TEXTS) + ")$")
+                ),
+                self._feature_menu_dispatch, block=False,
+            )
+        )
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                bounded_background(self, self.text_message), block=False,
+            )
         )
         self.application.add_error_handler(self.error_handler)
+
+    async def _feature_menu_dispatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if message is not None and message.text in {"海外晨报", "本周简报"}:
+            await bounded_background(self, self.feature_menu_message)(update, context)
+        else:
+            await self.feature_menu_message(update, context)
 
     async def _post_init(self, application: Application) -> None:
         await self.memory.initialize()
@@ -140,6 +173,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
                 self.agent = None
         await application.bot.set_my_commands(
             [
+                BotCommand("help", "功能菜单、图片和文件使用说明"),
                 BotCommand("stock", "个股研究：/stock 600875"),
                 BotCommand("market", "市场概览"),
                 BotCommand("report", "立即生成海外市场晨报"),
@@ -150,7 +184,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
                 BotCommand("status", "节点状态"),
                 BotCommand("new", "新建 pi 会话"),
                 BotCommand("abort", "中止当前 pi 任务"),
-                BotCommand("pistatus", "pi channel 状态"),
+                BotCommand("pistatus", "当前模型和任务状态"),
                 BotCommand("whoami", "显示 Telegram 用户 ID"),
             ]
         )
@@ -351,7 +385,10 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
             LOGGER.exception("weekly_report_failed trigger=manual user_id=%s", user.id)
             await self._finish_progress(update, progress, "周报暂时不可用，请稍后重试。")
 
-    async def _run_pi(self, update: Update, prompt: str) -> None:
+    async def _run_pi(
+        self, update: Update, prompt: str, *,
+        attachments: list[dict[str, str]] | None = None, progress: object | None = None,
+    ) -> None:
         if not await self._authorized(update):
             return
         user, chat = update.effective_user, update.effective_chat
@@ -365,20 +402,11 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
         message = update.effective_message
         if message is None:
             return
-        progress = await message.reply_text("🧠 pi 已接收，正在处理…")
+        if progress is None:
+            progress = await message.reply_text("⏳ 已接收，正在连接助手…\n/abort 可中止当前 pi 任务")
         started = time.monotonic()
-        last_progress = ""
-
-        async def on_progress(text: str) -> None:
-            nonlocal last_progress
-            display = f"🧠 {text}…"
-            if display == last_progress:
-                return
-            last_progress = display
-            try:
-                await progress.edit_text(display)
-            except Exception:  # noqa: BLE001 - progress updates are best effort
-                LOGGER.debug("pi_progress_edit_failed")
+        tracker = TaskProgress(progress, started=started)
+        tracker.start()
 
         request_id = uuid.uuid4().hex
         outcome, error_code, response = "failed", "upstream_error", ""
@@ -391,12 +419,18 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
                 await self.application.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
             except Exception:  # typing status must not prevent the actual request
                 LOGGER.debug("pi_typing_status_unavailable request_id=%s", request_id)
-            response = await self.pi_channel.prompt(user.id, prompt, on_progress)
+            if attachments:
+                response = await self.pi_channel.prompt(
+                    user.id, prompt, tracker.update, attachments=attachments
+                )
+            else:
+                response = await self.pi_channel.prompt(user.id, prompt, tracker.update)
             if not isinstance(response, str) or not response.strip():
                 raise PiChannelError(code="invalid_response")
             outcome, error_code = "success", "none"
             try:
-                await self.memory.append_turn(user.id, prompt, response, channel="pi")
+                memory_prompt = "[附带一份图片或文本；原附件不存入本数据库]\n" + prompt if attachments else prompt
+                await self.memory.append_turn(user.id, memory_prompt, response, channel="pi")
             except Exception:  # keep a successful answer available if memory fails
                 LOGGER.warning("pi_memory_write_failed request_id=%s", request_id)
         except asyncio.CancelledError:
@@ -409,6 +443,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin):
         except Exception:  # provider diagnostics must not leak into logs or chat
             response = error_message(error_code)
         finally:
+            await tracker.stop()
             if outcome == "failed":
                 LOGGER.warning(
                     "pi_request_failed request_id=%s user_id=%s error_code=%s",

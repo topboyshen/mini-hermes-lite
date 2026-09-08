@@ -15,6 +15,7 @@ PI_ERRORS = {
     "output_limit": "模型输出达到长度限制，请缩小任务范围后重试。",
     "cancelled": "任务已取消。",
     "channel_unavailable": "pi 通道连接不可用，请稍后重试。",
+    "channel_busy": "当前有 pi 任务正在运行，请完成后或用 /abort 中止后再新建会话。",
     "invalid_response": "模型未返回有效的最终答复，请稍后重试。",
 }
 

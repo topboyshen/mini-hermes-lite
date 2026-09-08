@@ -55,6 +55,20 @@ systemctl restart mini-hermes
 
 ## 验证与排错
 
+### 交互升级的离线候选验收
+
+图片/文本入口与 broker 协议需成套部署。先在无 `.env`、无业务数据库、无账号
+文件的临时候选目录测试，显式指定候选 `PYTHONPATH`，避免误用生产源码。
+用独立网络/挂载隔离隐藏生产目录、pi 账号与 socket；保留临时 Unix socket
+供回归测试使用。只执行 `tests/test_*.py` 与模拟 Node 测试，不执行真实模型、
+Telegram、审批接口或 `smoke_*`。原有默认 `--self-test` 会初始化数据库并探测
+MCP，不能当作完全只读/离线检查。
+
+本轮无需改 `.env`、systemd、OAuth、模型默认配置，也无需新增外部依赖。
+部署前确认没有普通聊天或研究请求在跑，记录干净的 Git 提交，再重启主 Bot 和
+pi broker。重启后验证 socket、模型固定值、服务状态及部署检查；真实附件效果
+需用户在 Telegram 发一份非敏感样例确认，不应伪造成功记录。
+
 Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.6`、
 `PI_CHANNEL_THINKING=low`。当前 Python 适配器依照已锁定的 PydanticAI 2.22.0
 消息接口实现；升级依赖后必须重跑多轮工具/签名回放测试。

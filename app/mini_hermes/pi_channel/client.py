@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .attachments import validate_attachments
 from .errors import classify_pi_failure, error_message, normalize_error_code
 
 ProgressCallback = Callable[[str], Awaitable[None]]
@@ -86,9 +87,17 @@ class PiChannelClient:
         user_id: int,
         message: str,
         on_progress: ProgressCallback | None = None,
+        *,
+        attachments: list[dict[str, str]] | None = None,
     ) -> str:
+        payload: dict[str, object] = {"action": "prompt", "user_id": user_id, "message": message}
+        if attachments is not None:
+            try:
+                payload["attachments"] = validate_attachments(attachments)
+            except ValueError:
+                raise PiChannelError(code="invalid_request") from None
         result = await self._request(
-            {"action": "prompt", "user_id": user_id, "message": message},
+            payload,
             on_progress,
         )
         text = result.get("text")
