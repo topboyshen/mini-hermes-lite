@@ -1,3 +1,7 @@
 pydantic-ai-slim[anthropic,mcp,openai]==2.22.0
 python-telegram-bot[job-queue]==22.8
 
+# Security pins for the genai-prices transitive HTTP stack (GHSA fixes).
+# Keep both packages in lockstep and aligned with requirements-frozen.txt.
+httpx2==2.12.0
+httpcore2==2.12.0

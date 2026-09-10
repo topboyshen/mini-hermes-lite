@@ -102,6 +102,29 @@ journalctl -u mini-hermes -n 100 --no-pager
 
 ## 更新代码后重启（必做闸门）
 
+### Python 依赖安全基线（2026-09-10）
+
+`genai-prices` 间接引入的 `httpx2` / `httpcore2` 固定为 `2.12.0`，
+与 `requirements-frozen.txt` 保持一致。不要将二者与 Telegram 使用的
+`httpx==0.28.1` / `httpcore==1.0.9` 混淆或替换。
+此版本覆盖本仓库 Dependabot #1–#6 的修复，包括 SOCKS 下安全 WebSocket
+的 TLS、SSE 缓冲、请求头校验和流式解压内存边界；见
+[上游发布说明](https://github.com/pydantic/httpx2/releases/tag/v2.12.0)。
+
+新环境和 CI 使用相同的完整版本清单，保留顶层依赖的 extras：
+
+```bash
+.venv/bin/python -m pip install -r requirements.lock -r requirements-frozen.txt
+.venv/bin/python -m pip check
+```
+
+已有生产环境本次只更新上述两个包。先在不含 `.env`、账号或业务数据的
+独立环境安装完整清单，运行离线部署闸门及依赖安全回归测试；验收通过后，
+确认 pi 聊天与研究均空闲，再安装相同的两个已验收版本并重启两个 Python
+服务。不要只修改锁文件而保留线上旧包，也不要为关闭告警而手动忽略漏洞。
+更新锁定版本时同步维护依赖安全回归用例；该用例检查已知安全下限与两份清单
+的一致性，不替代 Dependabot 对未来漏洞的检测。
+
 在 `systemctl restart` **之前**于 `/opt/mini-hermes` 执行：
 
 ```bash
