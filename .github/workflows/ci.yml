@@ -12,6 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -29,3 +32,10 @@ jobs:
         env:
           PYTHONPATH: app
         run: pytest -q --ignore-glob='smoke_*'
+      - name: Install pinned pi (for the installed-pi CLI suite)
+        run: npm install --global @earendil-works/pi-coding-agent@0.85.1
+      - name: Node suites (research relay + installed-pi attachments)
+        # Same entry point as the production release check. The attachment suite
+        # needs an isolated network namespace, so it runs as root with PATH kept
+        # so that the setup-node binary and npm prefix stay visible.
+        run: sudo env "PATH=${PATH}" bash scripts/run_node_suites.sh

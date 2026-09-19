@@ -81,11 +81,18 @@ Grok 研究中继要求 pi 0.85.1、Node >=22.19、`PI_CHANNEL_MODEL=xai/grok-4.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=app .venv/bin/python -m unittest discover -s tests -v
-node --test tests/test_research_completion.mjs
 ```
 
-在上述网络隔离候选中，额外运行 `tests/test_pi_cli_attachments.mjs`，校验已安装
-pi 的四档 CLI 解析和 Grok 4.6 映射；该原生测试拒绝在未隔离环境中运行。
+Node 套件（研究中继 16 项 + 已安装 pi 的 CLI 附件 8 项）由单一入口执行，
+CI 与生产发布检查调用同一脚本，套件清单不会两边漂移：
+
+```bash
+sudo scripts/run_node_suites.sh
+```
+
+该脚本要求已安装 pi（默认 `/usr/lib/node_modules/@earendil-works/pi-coding-agent`，
+可用 `PI_NATIVE_PACKAGE_DIR` 指向 CI/沙箱副本）、`unshare`，并在 `unshare --net`
+网络隔离下运行附件套件；环境不满足时以退出码 2 明确 BLOCKED，不静默跳过。
 
 部署时先验收候选，再同步代码，把生产 `.env` 的 `MODEL` 改为 `pi:grok-4.6`，
 确认无正在执行的研究/聊天后重启 `mini-hermes-pi` 和 `mini-hermes`。
