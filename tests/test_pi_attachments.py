@@ -16,6 +16,11 @@ from mini_hermes.pi_channel.attachments import (
 from mini_hermes.pi_channel.broker import PiChannelBroker
 from mini_hermes.pi_channel.client import MAX_MESSAGE_BYTES, PiChannelClient, PiChannelError
 
+import os
+
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
 
 def attachment(data=b"Synthetic UTF-8 text\n", name="notes.txt", mime="text/plain"):
     return {"name": name, "mime_type": mime, "data": base64.b64encode(data).decode("ascii")}

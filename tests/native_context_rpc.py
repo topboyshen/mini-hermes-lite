@@ -14,6 +14,10 @@ from mini_hermes.pi_channel.broker import PiChannelBroker
 from mini_hermes.pi_channel.context_maintenance import context_tokens
 
 
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
+
 async def main():
     assert os.readlink('/proc/self/ns/net') != os.environ['PI_NATIVE_HOST_NET_NAMESPACE']
     package = Path('/usr/lib/node_modules/@earendil-works/pi-coding-agent/package.json')

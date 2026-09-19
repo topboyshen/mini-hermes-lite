@@ -9,6 +9,11 @@ from unittest.mock import AsyncMock, Mock, patch
 from mini_hermes.pi_channel.context_maintenance import context_tokens
 from mini_hermes.pi_channel.broker import PiChannelBroker
 
+import os
+
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
 
 def usage_entry(tokens, identity='a', parent=None, **fields):
     return {'id': identity, 'parentId': parent, 'type': 'message', 'message': {

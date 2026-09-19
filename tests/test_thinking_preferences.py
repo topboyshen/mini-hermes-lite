@@ -18,6 +18,11 @@ from mini_hermes.pi_channel.client import PiChannelClient, PiChannelError
 from mini_hermes.thinking import THINKING_LEVELS, validate_thinking
 from test_pi_errors import Process, Writer, assistant, finished
 
+import os
+
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
 
 class PreferenceStorageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

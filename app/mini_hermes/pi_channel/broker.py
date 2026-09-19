@@ -21,6 +21,20 @@ from mini_hermes.thinking import validate_thinking
 
 LOGGER = logging.getLogger(__name__)
 RESEARCH_TIMEOUT_SECONDS = 120
+MODEL_ENV = "PI_CHANNEL_MODEL"
+
+
+def required_model() -> str:
+    """Refuse to guess a model: a missing setting must fail closed.
+
+    The unit declares the model explicitly. Defaulting to a historical model
+    would silently run user traffic against an unintended model, so an unset or
+    blank value is a configuration error instead.
+    """
+    model = os.getenv(MODEL_ENV, "").strip()
+    if not model:
+        raise RuntimeError(f"{MODEL_ENV} is not configured; refusing an implicit model fallback")
+    return model
 
 RESEARCH_ERRORS = {
     code: error_message(code)
@@ -62,7 +76,7 @@ class PiChannelBroker(ContextMaintenanceMixin):
         self.socket_path = Path(os.getenv("PI_CHANNEL_SOCKET", "/run/mini-hermes-pi/pi.sock"))
         self.state_dir = Path(os.getenv("PI_CHANNEL_STATE_DIR", "/var/lib/mini-hermes-pi"))
         self.workspace = Path(os.getenv("PI_CHANNEL_WORKSPACE", "/opt/mini-hermes/workspace"))
-        self.model = os.getenv("PI_CHANNEL_MODEL", "ollama-cloud/deepseek-v4-pro")
+        self.model = required_model()
         self.thinking = os.getenv("PI_CHANNEL_THINKING", "off")
         self.timeout_seconds = int(os.getenv("PI_CHANNEL_TIMEOUT_SECONDS", "600"))
         self._lock = asyncio.Lock()

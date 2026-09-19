@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import socket
 import struct
@@ -12,6 +13,9 @@ from unittest.mock import AsyncMock, Mock, patch
 from mini_hermes.pi_channel.broker import PiChannelBroker
 from mini_hermes.pi_channel.client import MAX_MESSAGE_BYTES, PiChannelClient, PiChannelError
 
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
 
 def message(text='research reply'):
     return {'role': 'assistant', 'content': [{'type': 'text', 'text': text}],
@@ -20,6 +24,17 @@ def message(text='research reply'):
 
 
 class PeerTests(unittest.TestCase):
+    def test_broker_refuses_to_invent_a_model(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PI_CHANNEL_MODEL", None)
+            with self.assertRaises(RuntimeError):
+                PiChannelBroker()
+        with patch.dict(os.environ, {"PI_CHANNEL_MODEL": "   "}):
+            with self.assertRaises(RuntimeError):
+                PiChannelBroker()
+        with patch.dict(os.environ, {"PI_CHANNEL_MODEL": "xai/grok-4.6"}):
+            self.assertEqual(PiChannelBroker().model, "xai/grok-4.6")
+
     @unittest.skipUnless(hasattr(socket, 'SO_PEERCRED'), 'Linux peer credentials')
     def test_research_peer_is_root_or_main_bot_only(self):
         broker = PiChannelBroker()

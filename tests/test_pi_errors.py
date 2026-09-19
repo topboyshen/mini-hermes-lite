@@ -9,6 +9,11 @@ from unittest.mock import AsyncMock, patch
 from mini_hermes.pi_channel.broker import PiChannelBroker
 from mini_hermes.pi_channel.errors import PI_ERRORS, classify_pi_failure, error_message, normalize_error_code
 
+import os
+
+# Tests exercise the deployed contract: the unit declares the model explicitly.
+os.environ.setdefault("PI_CHANNEL_MODEL", "xai/grok-4.6")
+
 
 def assistant(text="", *, stop="stop", error="", tool=False):
     content = [{"type": "text", "text": text}] if text else []
