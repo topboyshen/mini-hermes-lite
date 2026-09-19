@@ -62,13 +62,25 @@ else
   "$ROOT/scripts/run_node_suites.sh"
 fi
 
+SKIPPED_STEPS=()
+[[ "$SKIP_NODE_SUITES" -eq 1 ]] && SKIPPED_STEPS+=("node suites")
+
 if [[ "$SKIP_SELF_TEST" -eq 1 ]]; then
   echo "==> [4/4] self-test skipped (--skip-self-test)"
+  SKIPPED_STEPS+=("self-test")
 elif [[ ! -f "$ROOT/.env" ]]; then
   echo "==> [4/4] self-test skipped (no .env; use on CI or pass --skip-self-test)"
+  SKIPPED_STEPS+=("self-test (no .env)")
 else
   echo "==> [4/4] self-test"
   "$PYTHON" -m mini_hermes --self-test
+fi
+
+if [[ ${#SKIPPED_STEPS[@]} -gt 0 ]]; then
+  echo
+  echo "pre-restart gate: PARTIAL — 已通过的执行到位，但跳过：${SKIPPED_STEPS[*]}"
+  echo "  部分检查通过，不构成生产发布验收；不得据此重启生产服务。"
+  exit 0
 fi
 
 echo "pre-restart gate OK — safe to restart:"
