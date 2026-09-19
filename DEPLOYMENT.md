@@ -138,10 +138,15 @@ journalctl -u mini-hermes -n 100 --no-pager
 ./deploy/pre-restart-gate.sh
 # 无 .env 的环境（如纯 CI）可：
 # ./deploy/pre-restart-gate.sh --skip-self-test
+# 非部署主机才可跳过 Node 套件（会打印跳过提示）：
+# ./deploy/pre-restart-gate.sh --skip-node-suites
 systemctl restart mini-hermes-pi mini-hermes
 ```
 
-闸门顺序：`compileall` → `pytest` → `--self-test`（有 `.env` 时）。任一步失败则不要重启。
+闸门顺序：`compileall` → `pytest` → `scripts/run_node_suites.sh`（与 CI 和主机发布检查
+同一入口，缺 node/pi/unshare 时退出码 2，不静默跳过）→ `--self-test`（有 `.env` 时）。
+任一步失败则不要重启。整机发布检查 `vps-preflight` 另含 systemd、nginx、防火墙、
+密钥扫描与配置漂移等宿主机项。
 
 ## 内存上限（1.9Gi 主机）
 
