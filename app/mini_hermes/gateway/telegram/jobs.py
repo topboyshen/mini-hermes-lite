@@ -63,6 +63,7 @@ class JobsMixin:
                     chat_id,
                     bundle.brief,
                     reply_markup=self._full_report_markup(bundle) if report_saved else None,
+                    delivery_key=("daily", now.date().isoformat()),
                 )
                 LOGGER.info(
                     "report_delivery_succeeded trigger=scheduled user_id=%s chat_id=%s "
@@ -107,7 +108,10 @@ class JobsMixin:
             return
         for user_id, chat_id in recipients:
             try:
-                message_ids = await self._deliver_report(context.bot, chat_id, report)
+                message_ids = await self._deliver_report(
+                    context.bot, chat_id, report,
+                    delivery_key=("weekly", now.date().isoformat()),
+                )
                 LOGGER.info(
                     "weekly_report_delivery_succeeded user_id=%s chat_id=%s "
                     "message_ids=%s chars=%s",

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 import sqlite3
+import uuid
 
 from mini_hermes.thinking import DEFAULT_THINKING, validate_scope, validate_thinking
 
@@ -90,6 +91,29 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_market_report_details_created
                 ON market_report_details(created_at DESC);
+            CREATE TABLE IF NOT EXISTS report_deliveries (
+                report_kind TEXT NOT NULL CHECK (report_kind IN ('daily', 'weekly')),
+                report_date TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                part_count INTEGER NOT NULL CHECK (part_count > 0),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (report_kind, report_date, chat_id)
+            );
+            CREATE TABLE IF NOT EXISTS report_delivery_parts (
+                report_kind TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                part_index INTEGER NOT NULL CHECK (part_index >= 0),
+                content_sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('sending', 'confirmed', 'unknown', 'failed')),
+                claim_id TEXT NOT NULL,
+                message_id INTEGER,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (report_kind, report_date, chat_id, part_index),
+                FOREIGN KEY (report_kind, report_date, chat_id)
+                    REFERENCES report_deliveries(report_kind, report_date, chat_id)
+            );
             """
         )
         self._migrate_conversation_channel()
@@ -100,6 +124,81 @@ class MemoryStore:
             """
         )
         self._connection.commit()
+
+        # A previous process may have exited after Telegram accepted a part but
+        # before its acknowledgement was committed. Never resend such a part.
+        with self._connection:
+            self._connection.execute(
+                "UPDATE report_delivery_parts SET status='unknown' WHERE status='sending'"
+            )
+
+    async def claim_report_part(
+        self, report_kind: str, report_date: str, chat_id: int,
+        content_sha256: str, part_count: int, part_index: int, part_sha256: str,
+    ) -> dict[str, object]:
+        if report_kind not in {'daily', 'weekly'}:
+            raise ValueError('invalid report kind')
+        if datetime.fromisoformat(report_date).date().isoformat() != report_date:
+            raise ValueError('invalid report date')
+        if (type(chat_id) is not int or type(part_count) is not int or part_count <= 0
+                or type(part_index) is not int or not 0 <= part_index < part_count
+                or any(len(value) != 64 or any(c not in '0123456789abcdef' for c in value)
+                       for value in (content_sha256, part_sha256))):
+            raise ValueError('invalid report delivery identity')
+        identity = (report_kind, report_date, chat_id)
+        async with self._lock:
+            db = self._db()
+            # The first INSERT acquires SQLite's write lock. The identity and
+            # part claim are checked in the same transaction across processes.
+            with db:
+                db.execute(
+                    'INSERT OR IGNORE INTO report_deliveries VALUES (?, ?, ?, ?, ?, ?)',
+                    (*identity, content_sha256, part_count, _now()),
+                )
+                delivery = db.execute(
+                    'SELECT content_sha256, part_count FROM report_deliveries '
+                    'WHERE report_kind=? AND report_date=? AND chat_id=?', identity,
+                ).fetchone()
+                if delivery['content_sha256'] != content_sha256 or delivery['part_count'] != part_count:
+                    raise ValueError('scheduled report content changed')
+                row = db.execute(
+                    'SELECT * FROM report_delivery_parts WHERE report_kind=? AND report_date=? '
+                    'AND chat_id=? AND part_index=?', (*identity, part_index),
+                ).fetchone()
+                if row is not None:
+                    if row['content_sha256'] != part_sha256:
+                        raise ValueError('scheduled report part changed')
+                    return dict(row)
+                claim_id = uuid.uuid4().hex
+                db.execute(
+                    'INSERT INTO report_delivery_parts '
+                    '(report_kind,report_date,chat_id,part_index,content_sha256,status,claim_id,updated_at) '
+                    "VALUES (?,?,?,?,?,'sending',?,?)",
+                    (*identity, part_index, part_sha256, claim_id, _now()),
+                )
+            return {'status': 'claimed', 'claim_id': claim_id, 'message_id': None}
+
+    async def finish_report_part(
+        self, report_kind: str, report_date: str, chat_id: int, part_index: int,
+        claim_id: str, status: str, message_id: int | None = None,
+    ) -> None:
+        if status not in {'confirmed', 'unknown', 'failed'}:
+            raise ValueError('invalid report delivery outcome')
+        if status == 'confirmed' and (type(message_id) is not int or message_id <= 0):
+            raise ValueError('invalid Telegram acknowledgement')
+        if status != 'confirmed' and message_id is not None:
+            raise ValueError('message id requires confirmation')
+        async with self._lock:
+            db = self._db()
+            with db:
+                cursor = db.execute(
+                    'UPDATE report_delivery_parts SET status=?,message_id=?,updated_at=? '
+                    'WHERE report_kind=? AND report_date=? AND chat_id=? AND part_index=? '
+                    "AND claim_id=? AND status IN ('sending','unknown')",
+                    (status, message_id, _now(), report_kind, report_date, chat_id, part_index, claim_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError('report delivery acknowledgement conflicts with durable state')
 
 
     def _migrate_conversation_channel(self) -> None:

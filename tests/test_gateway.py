@@ -223,6 +223,8 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         bot.memory = SimpleNamespace(
             subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)]),
             save_market_report=AsyncMock(),
+            claim_report_part=AsyncMock(return_value={"status": "claimed", "claim_id": "fixture"}),
+            finish_report_part=AsyncMock(),
         )
         bundle = GlobalReportBundle("2026-08-08", "brief report", "overseas report")
         bot._generate_global_report_bundle = AsyncMock(return_value=bundle)
