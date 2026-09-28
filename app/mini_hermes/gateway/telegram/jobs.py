@@ -76,10 +76,11 @@ class JobsMixin:
             except ReportDeliveryError as exc:
                 LOGGER.exception(
                     "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s "
-                    "partial_message_ids=%s",
+                    "partial_message_ids=%s outcome=%s retry=no",
                     user_id,
                     chat_id,
                     exc.message_ids,
+                    exc.outcome,
                 )
             except Exception:  # noqa: BLE001 - one subscriber must not block others
                 LOGGER.exception(

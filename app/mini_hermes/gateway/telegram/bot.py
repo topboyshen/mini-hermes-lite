@@ -349,7 +349,7 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
                 chat.id,
                 exc.message_ids,
             )
-            await self._reply(update, "晨报投递未完整完成，请稍后重试。")
+            await self._reply(update, "晨报投递结果待确认。请先查看已收到的内容，勿重复提交。")
             return
         except Exception:  # noqa: BLE001 - keep Telegram handler alive
             LOGGER.exception(
@@ -379,6 +379,11 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         progress = await message.reply_text("⏳ 正在汇总本周海外市场，请稍候…")
         try:
             report = await self._generate_weekly_report()
+        except Exception:  # noqa: BLE001 - generation failed before delivery
+            LOGGER.exception("weekly_report_failed trigger=manual user_id=%s", user.id)
+            await self._finish_progress(update, progress, "周报暂时不可用，请稍后重试。")
+            return
+        try:
             await self._deliver_report(
                 self.application.bot,
                 chat.id,
@@ -386,8 +391,10 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
                 progress=progress,
             )
         except Exception:  # noqa: BLE001 - keep Telegram handler alive
-            LOGGER.exception("weekly_report_failed trigger=manual user_id=%s", user.id)
-            await self._finish_progress(update, progress, "周报暂时不可用，请稍后重试。")
+            LOGGER.exception("weekly_report_delivery_unconfirmed trigger=manual user_id=%s", user.id)
+            # The first part may already be visible. Never replace that part
+            # with an error banner or repeat the report after a lost ACK.
+            await self._reply(update, "周报投递结果待确认。请先查看已收到的内容，勿重复提交。")
 
     async def _run_pi(
         self, update: Update, prompt: str, *,

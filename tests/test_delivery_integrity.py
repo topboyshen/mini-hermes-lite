@@ -13,6 +13,7 @@ from mini_hermes.gateway.telegram.delivery import (
     DeliveryMixin, ReportDeliveryError, send_message_with_light_retry,
 )
 from mini_hermes.memory import MemoryStore
+from mini_hermes.gateway.telegram.bot import MiniHermesBot
 
 
 class DeliveryIntegrityTests(unittest.IsolatedAsyncioTestCase):
@@ -141,6 +142,22 @@ class DeliveryIntegrityTests(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(reply_text=AsyncMock())
         await self.delivery._finish_progress(SimpleNamespace(effective_message=message), progress, "a" * 4000 + "b")
         self.assertEqual([call.args[0] for call in message.reply_text.await_args_list], ["a" * 4000, "b"])
+
+    async def test_weekly_delivery_error_keeps_already_sent_first_part(self):
+        bot = object.__new__(MiniHermesBot)
+        progress = SimpleNamespace(edit_text=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(return_value=progress))
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=42), effective_message=message)
+        bot._authorized = AsyncMock(return_value=True)
+        bot._generate_weekly_report = AsyncMock(return_value="a" * 4100)
+        bot.application = SimpleNamespace(bot=object())
+        bot._deliver_report = AsyncMock(side_effect=ReportDeliveryError([10]))
+        bot._finish_progress = AsyncMock()
+        bot._reply = AsyncMock()
+        await bot._run_weekly_report(update)
+        bot._finish_progress.assert_not_called()
+        self.assertIn("勿重复提交", bot._reply.await_args.args[1])
 
 
 if __name__ == "__main__":
