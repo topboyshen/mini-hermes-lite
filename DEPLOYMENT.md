@@ -109,6 +109,40 @@ journalctl -u mini-hermes -n 100 --no-pager
 
 ## 更新代码后重启（必做闸门）
 
+### JWT / Requests 依赖安全基线（2026-10-07）
+
+`PyJWT==2.15.0`、`urllib3==2.8.0` 同时固定在两份依赖清单中。
+PyJWT 经 MCP 使用，urllib3 经 Requests/tiktoken 使用；两者不是可忽略的
+开发工具依赖。保留原有 httpx2/httpcore2 2.12.0 与其余包版本不变。
+
+- PyJWT 2.15.0 包含 2.14.0 的密钥类型/验证修复和未验签深嵌套 JSON 修复。
+  对 options 字典突变的告警元数据仍未列出 patched version；2.15.0 发布包
+  `_merge_options` 已复制调用方字典，本仓回归同时验证字典不变与后续过期拒绝。
+- urllib3 2.8.0 修复 HTTPS 代理 TLS 配置覆盖、无界 chunk 行读取及 Deflate
+  流式解码循环。代理 TLS 需要使用独立 `proxy_ssl_context`，不能借用目标证书配置。
+- `tests/test_dependency_security.py` 离线验证版本下限、JWT 拒绝边界、MCP 实际签名调用以及
+  Requests 流式解码和代理 TLS 参数兼容性。测试不调用真实账号或外部接口。
+- 升级前在无 `.env`、业务库和账号文件的候选目录验证 `pip check`、Python
+  与 Node 全套；包文件应取自官方 PyPI 并核对 SHA256。两个 systemd 服务
+  共用 `.venv`，维护窗口确认空闲后都需重启；不要运行写业务库的在线自检。
+
+本次依赖维护的完整 `deploy/pre-restart-gate.sh` 在独立候选目录执行，
+不使用任何 skip 参数：用私有 mount/network namespace 遮蔽生产环境文件、
+pi 账号和 socket，指定临时 DATA_DIR/LOG_DIR 及带一个工具的本地 stdio MCP
+夹具后运行自检。自检数据库及 MCP 都应为 `ok`。仅在候选目录创建空 `.env`
+并不足以隔离：应用默认仍读取 `/opt/mini-hermes/.env`，必须遮蔽该路径。
+该验收证明依赖与本地协议兼容，不代表真实外部业务端到端验收；上线后另查
+安装版本、两个服务及只读 broker status。下文直接在生产运行默认闸门的
+通用示例不用于本次依赖维护，不得用 PARTIAL 输出替代完整候选验收。
+
+官方依据：
+[PyJWT 2.15.0](https://github.com/jpadilla/pyjwt/releases/tag/2.15.0)、
+[options 字典告警](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-gvp8-978c-rx2q)、
+[urllib3 2.8.0](https://github.com/urllib3/urllib3/releases/tag/2.8.0)。
+
+这是依赖安全修复，不变更模型、账号、报告策略或持仓，也不把 GitHub 告警
+关闭等同于业务端到端验收。部署后须另行核对实际安装版本、服务与 GitHub 状态。
+
 ### Python 依赖安全基线（2026-09-10）
 
 `genai-prices` 间接引入的 `httpx2` / `httpcore2` 固定为 `2.12.0`，

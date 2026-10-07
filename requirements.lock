@@ -5,3 +5,8 @@ python-telegram-bot[job-queue]==22.8
 # Keep both packages in lockstep and aligned with requirements-frozen.txt.
 httpx2==2.12.0
 httpcore2==2.12.0
+
+# Security floors for MCP JWT handling and Requests' HTTP transport.
+# Keep these exact pins aligned with requirements-frozen.txt.
+PyJWT==2.15.0
+urllib3==2.8.0

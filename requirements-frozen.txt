@@ -58,7 +58,7 @@ pydantic-graph==2.22.0
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
 Pygments==2.20.0
-PyJWT==2.13.0
+PyJWT==2.15.0
 pytest==9.1.1
 python-dotenv==1.2.2
 python-multipart==0.0.32
@@ -78,6 +78,6 @@ truststore==0.10.4
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 tzlocal==5.4.4
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.1
 zipp==4.1.0
