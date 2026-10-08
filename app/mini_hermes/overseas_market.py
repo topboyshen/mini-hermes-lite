@@ -26,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 _SINA_FUTURES_URL = "https://hq.sinajs.cn/list=hf_GC,hf_CL,hf_SI"
 _SINA_DOLLAR_URL = "https://hq.sinajs.cn/list=DINIW"
 _SINA_REGIONAL_URL = "https://hq.sinajs.cn/list=int_nikkei,int_hangseng,int_ftse"
-_CBOE_VIX_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
+_CBOE_VIX_URL = "https://cdn-api.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
 _TREASURY_URL = (
     "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
     "pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value={year}"

@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from mini_hermes import overseas_market
 from mini_hermes.market_context import MarketContext
 from mini_hermes.overseas_market import (
@@ -190,6 +192,45 @@ class _FakeClient:
 
 
 class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cboe_vix_uses_canonical_api_without_redirect(self) -> None:
+        seen = []
+        canonical = "https://cdn-api.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
+        payload = {
+            "timestamp": "2026-10-08 07:12:10",
+            "data": {"current_price": "15.08", "price_change": "0.07",
+                     "price_change_percent": "0.4642", "high": "15.93", "low": "14.97",
+                     "last_trade_time": "2026-10-07T16:15:01"},
+        }
+
+        def respond(request):
+            seen.append(str(request.url))
+            if request.url.host == "cdn.cboe.com":
+                return httpx.Response(307, headers={"Location": canonical})
+            self.assertEqual(str(request.url), canonical)
+            return httpx.Response(200, json=payload)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            quote = await overseas_market._fetch_cboe_vix(client)
+        self.assertEqual(seen, [canonical])
+        self.assertEqual(quote.price, Decimal("15.08"))
+        self.assertEqual(quote.as_of, "2026-10-07T16:15:01")
+
+    async def test_cboe_unexpected_redirect_remains_missing_with_warning(self) -> None:
+        seen = []
+
+        def respond(request):
+            seen.append(str(request.url))
+            return httpx.Response(307, headers={"Location": "https://unexpected.invalid/vix"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with self.assertLogs(overseas_market.LOGGER, level="WARNING") as logs:
+                quote = await overseas_market._safe_fetch(
+                    "cboe_vix", overseas_market._fetch_cboe_vix(client), None,
+                )
+        self.assertIsNone(quote)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("source=cboe_vix", "\n".join(logs.output))
+
     async def test_sources_share_client_and_one_failure_does_not_abort_snapshot(self) -> None:
         fake_client = _FakeClient()
         seen_clients: list[object] = []
