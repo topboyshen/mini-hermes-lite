@@ -53,7 +53,7 @@ pluggy==1.6.0
 py-key-value-aio==0.4.5
 pycparser==3.0
 pydantic==2.13.4
-pydantic-ai-slim==2.22.0
+pydantic-ai-slim==2.53.0
 pydantic-graph==2.22.0
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
