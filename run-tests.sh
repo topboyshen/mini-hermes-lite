@@ -18,8 +18,16 @@ LOG_FILE=".test-runs/run-$TS.log"
 touch "$LOG_FILE"; chmod 0660 "$LOG_FILE"
 
 # --- 保护层实证 (v5) ---
-PROTECT_LIB="${PROTECT_LIB_PATH:-/usr/local/lib/vpstest/protection-lib.sh}"
+PROTECT_LIB="/usr/local/lib/vpstest/protection-lib.sh"
 [[ -r "$PROTECT_LIB" ]] || { echo "FAIL: $PROTECT_LIB 不可读 (protection 库未部署)" >&2; exit 9; }
+# 保护库必须是 root:root 0644 — 被替换则拒绝
+_owner=$(stat -Lc "%U:%G" "$PROTECT_LIB")
+_mode=$(stat -Lc "%a" "$PROTECT_LIB")
+if [[ "$_owner" != "root:root" || "$_mode" != "644" ]]; then
+  echo "FAIL: $PROTECT_LIB 权限/owner 不符 (期望 root:root 0644, 实际 $_owner $_mode)" >&2
+  exit 9
+fi
+unset _owner _mode
 # shellcheck disable=SC1090
 source "$PROTECT_LIB"
 
