@@ -257,6 +257,15 @@ def parse_cboe_vix(payload: Mapping[str, Any]) -> CrossAssetQuote | None:
         low = _decimal(data.get("low"))
     except ValueError:
         return None
+    raw_previous = data.get("prev_day_close")
+    previous_close = _optional_decimal(None if raw_previous is None else str(raw_previous))
+    # After the session Cboe rolls prev_day_close to that session's close and
+    # recomputes price_change_percent against it, while price_change still
+    # describes the finished session. When price - change no longer matches
+    # prev_day_close, the percent is not the session move: drop it instead of
+    # publishing (or rejecting VIX for) an inconsistent figure.
+    if previous_close is not None and change != 0 and abs(price - change - previous_close) > Decimal("0.01"):
+        percent = None
     return CrossAssetQuote(
         code="VIX",
         name=str(data.get("name") or "Cboe波动率指数"),

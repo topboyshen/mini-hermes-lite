@@ -126,6 +126,59 @@ class OverseasParserTests(unittest.TestCase):
         self.assertEqual(quote.low, Decimal("17.10"))
         self.assertEqual(quote.as_of, "2026-08-03T20:15:00")
 
+    def test_cboe_vix_rolled_previous_close_drops_inconsistent_percent(self) -> None:
+        # Real Cboe payload fetched 2026-10-17 19:35 (UTC+8), after the 10/16 session.
+        rolled = {
+            "data": {
+                "close": 19.99, "current_price": 19.99, "prev_day_close": 19.99,
+                "price_change": 3.53, "price_change_percent": 17.6588,
+                "open": 15.81, "high": 22.31, "low": 15.72,
+                "last_trade_time": "2026-10-16T16:15:01",
+            }
+        }
+        quote = parse_cboe_vix(rolled)
+        self.assertIsNotNone(quote)
+        assert quote is not None
+        self.assertIsNone(quote.percent)
+        self.assertEqual(quote.price, Decimal("19.99"))
+        self.assertEqual(quote.change, Decimal("3.53"))
+        self.assertEqual(quote.high, Decimal("22.31"))
+        self.assertEqual(quote.low, Decimal("15.72"))
+        self.assertEqual(quote.as_of, "2026-10-16T16:15:01")
+
+    def test_cboe_vix_consistent_previous_close_keeps_percent(self) -> None:
+        quote = parse_cboe_vix(
+            {
+                "data": {
+                    "current_price": 19.99, "prev_day_close": 16.46,
+                    "price_change": 3.53, "price_change_percent": 21.45,
+                    "high": 22.31, "low": 15.72,
+                    "last_trade_time": "2026-10-16T16:15:01",
+                }
+            }
+        )
+        self.assertIsNotNone(quote)
+        assert quote is not None
+        self.assertEqual(quote.percent, Decimal("21.45"))
+
+    def test_cboe_vix_without_previous_close_inconsistent_percent_still_rejected(self) -> None:
+        from datetime import timezone
+        from mini_hermes.reporting import _asset_quality_issue
+        generated_at = datetime(2026, 10, 17, 0, 30, tzinfo=timezone.utc)
+        payload = {
+            "data": {
+                "current_price": 19.99, "price_change": 3.53, "price_change_percent": 17.6588,
+                "high": 22.31, "low": 15.72, "last_trade_time": "2026-10-16T16:15:01",
+            }
+        }
+        quote = parse_cboe_vix(payload)
+        assert quote is not None
+        self.assertEqual(quote.percent, Decimal("17.6588"))
+        self.assertEqual(_asset_quality_issue(quote, generated_at=generated_at), "涨跌幅与价格变动不一致")
+        rolled = parse_cboe_vix({"data": {**payload["data"], "prev_day_close": 19.99}})
+        assert rolled is not None
+        self.assertIsNone(_asset_quality_issue(rolled, generated_at=generated_at))
+
     def test_treasury_uses_latest_two_complete_rows(self) -> None:
         curve = parse_treasury_curve(TREASURY_XML)
 
