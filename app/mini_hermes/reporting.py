@@ -1191,9 +1191,9 @@ def render_risk_level(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> st
     watch: list[str] = []
     if vix is not None:
         if vix.price >= Decimal("30"):
-            critical.append(f"VIX升至 {_format_market_number(vix.price)}")
+            critical.append(f"VIX报 {_format_market_number(vix.price)}")
         elif vix.price >= Decimal("20"):
-            watch.append(f"VIX升至 {_format_market_number(vix.price)}")
+            watch.append(f"VIX报 {_format_market_number(vix.price)}")
     if stats.complete and stats.average_percent is not None:
         if stats.average_percent <= Decimal("-2"):
             critical.append(f"三大指数均值 {_format_decimal(stats.average_percent, signed=True)}%")
@@ -1271,7 +1271,7 @@ def render_plain_language_summary(
             )
         elif vix is not None:
             sentences.append(
-                f"{tone}，VIX升至 {_format_market_number(vix.price)}，风险偏好需要谨慎。"
+                f"{tone}，VIX报 {_format_market_number(vix.price)}，风险偏好需要谨慎。"
             )
         else:
             sentences.append(f"{tone}。")
