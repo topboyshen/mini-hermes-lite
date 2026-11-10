@@ -242,7 +242,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         bot._generate_global_report_bundle.assert_awaited_once_with()
         bot.memory.save_market_report.assert_awaited_once_with(
-            "2026-08-08", "overseas report"
+            "2026-08-08", "overseas report", vix_evidence=None, trigger="scheduled"
         )
         self.assertEqual(send_message.await_count, 2)
         send_message.assert_any_await(

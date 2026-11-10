@@ -395,7 +395,7 @@ class OverseasFetchTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(overseas_market, "_fetch_sina_futures", side_effect=futures),
             patch.object(overseas_market, "_fetch_sina_dollar", side_effect=dollar_index),
-            patch.object(overseas_market, "_fetch_cboe_vix", side_effect=failed_vix),
+            patch.object(overseas_market, "_collect_cboe_vix", side_effect=failed_vix),
             patch.object(overseas_market, "_fetch_treasury", side_effect=treasury),
             patch.object(overseas_market, "_fetch_coinbase_btc", side_effect=bitcoin),
             patch.object(overseas_market, "_fetch_sina_regional", side_effect=regional),
