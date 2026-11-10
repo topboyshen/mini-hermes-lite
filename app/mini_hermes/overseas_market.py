@@ -10,6 +10,8 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import inspect
 import logging
 import re
 from typing import Any, Awaitable, Mapping, TypeVar
@@ -19,6 +21,7 @@ import httpx
 
 from mini_hermes.market_context import MarketContext, fetch_market_context
 from mini_hermes.us_market import UsIndexQuote, fetch_us_quotes
+from mini_hermes.vix_evidence import observation_json
 
 
 LOGGER = logging.getLogger(__name__)
@@ -111,6 +114,7 @@ class OverseasMarketSnapshot:
     treasury: TreasuryCurve | None
     regional_indices: tuple[RegionalIndexQuote, ...] = ()
     market_context: MarketContext | None = None
+    vix_observation_json: str | None = None
 
 
 def _decimal(value: Any) -> Decimal:
@@ -281,6 +285,16 @@ def parse_cboe_vix(payload: Mapping[str, Any]) -> CrossAssetQuote | None:
     )
 
 
+# Freeze the callable and its source identity together on import, not by reading
+# a possibly replaced file or Git HEAD at report-save time. A missing source hash
+# is explicit (e.g. a source-less package), never a fabricated version proof.
+_VIX_PARSER = parse_cboe_vix
+try:
+    _VIX_PARSER_SOURCE_SHA256 = sha256(inspect.getsource(_VIX_PARSER).encode("utf-8")).hexdigest()
+except (OSError, TypeError):
+    _VIX_PARSER_SOURCE_SHA256 = None
+
+
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -435,12 +449,38 @@ async def _fetch_sina_regional(client: httpx.AsyncClient) -> tuple[RegionalIndex
 
 
 async def _fetch_cboe_vix(client: httpx.AsyncClient) -> CrossAssetQuote:
-    response = await client.get(_CBOE_VIX_URL, headers=_JSON_HEADERS)
-    response.raise_for_status()
-    quote = parse_cboe_vix(response.json())
+    quote, _ = await _collect_cboe_vix(client)
     if quote is None:
         raise ValueError("no valid VIX record")
     return quote
+
+
+async def _collect_cboe_vix(client: httpx.AsyncClient) -> tuple[CrossAssetQuote | None, str]:
+    """Capture a small observation even when parsing/fetching fails."""
+    started = datetime.now(UTC)
+    payload = None
+    quote = None
+    error_type = None
+    try:
+        response = await client.get(_CBOE_VIX_URL, headers=_JSON_HEADERS)
+        response.raise_for_status()
+        # Retain decimal JSON numbers losslessly as scalar strings in evidence.
+        payload = response.json(parse_float=str)
+        if isinstance(payload, Mapping):
+            quote = _VIX_PARSER(payload)
+        if quote is None:
+            LOGGER.warning("overseas_asset_parse_missing source=cboe_vix code=VIX")
+    except Exception as exc:  # noqa: BLE001 - keep a source failure isolated
+        # Do not retain exception messages (URLs/proxy credentials/body snippets).
+        error_type = type(exc).__name__
+        LOGGER.warning("overseas_source_fetch_failed source=cboe_vix error_type=%s", error_type)
+    completed = datetime.now(UTC)
+    evidence = observation_json(
+        payload, quote, collected_at=started, completed_at=completed,
+        parser={"version": "cboe-vix-prev-close-v1", "source_sha256": _VIX_PARSER_SOURCE_SHA256},
+        error_type=error_type,
+    )
+    return quote, evidence
 
 
 async def _fetch_treasury(client: httpx.AsyncClient, year: int) -> TreasuryCurve:
@@ -496,7 +536,7 @@ async def fetch_overseas_snapshot(
         futures, dollar, vix, treasury, btc, regional, market_context = await asyncio.gather(
             _safe_fetch("sina_futures", _fetch_sina_futures(client), ()),
             _safe_fetch("sina_dollar", _fetch_sina_dollar(client), None),
-            _safe_fetch("cboe_vix", _fetch_cboe_vix(client), None),
+            _safe_fetch("cboe_vix", _collect_cboe_vix(client), (None, None)),
             _safe_fetch("us_treasury", _fetch_treasury(client, treasury_year), None),
             _safe_fetch("coinbase_btc", _fetch_coinbase_btc(client), None),
             _safe_fetch("sina_regional", _fetch_sina_regional(client), ()),
@@ -507,13 +547,15 @@ async def fetch_overseas_snapshot(
             ),
         )
     us_indices = await us_task
+    vix_quote, vix_observation = vix
 
     assets = list(futures)
-    assets.extend(quote for quote in (dollar, vix, btc) if quote is not None)
+    assets.extend(quote for quote in (dollar, vix_quote, btc) if quote is not None)
     return OverseasMarketSnapshot(
         us_indices=tuple(us_indices),
         assets=tuple(assets),
         treasury=treasury,
         regional_indices=tuple(regional),
         market_context=market_context,
+        vix_observation_json=vix_observation,
     )

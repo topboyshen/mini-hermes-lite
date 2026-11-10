@@ -50,7 +50,10 @@ class JobsMixin:
             LOGGER.exception("report_generation_failed trigger=scheduled date=%s", now.date())
             return
         try:
-            await self.memory.save_market_report(bundle.report_date, bundle.full)
+            await self.memory.save_market_report(
+                bundle.report_date, bundle.full, vix_evidence=bundle.vix_evidence,
+                trigger="scheduled",
+            )
             report_saved = True
         except Exception:  # noqa: BLE001 - history failure must not block delivery
             LOGGER.exception("report_history_save_failed date=%s", now.date())

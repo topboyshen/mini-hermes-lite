@@ -326,7 +326,10 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
             )
             return
         try:
-            await self.memory.save_market_report(bundle.report_date, bundle.full)
+            await self.memory.save_market_report(
+                bundle.report_date, bundle.full, vix_evidence=bundle.vix_evidence,
+                trigger="manual",
+            )
             report_saved = True
         except Exception:  # noqa: BLE001 - detail storage must not block the brief
             LOGGER.exception(

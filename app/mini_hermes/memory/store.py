@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
+import json
 from pathlib import Path
 import sqlite3
 import uuid
 
 from mini_hermes.thinking import DEFAULT_THINKING, validate_scope, validate_thinking
+from mini_hermes.vix_evidence import encode_report_evidence
 
 
 def _now() -> str:
@@ -91,6 +94,19 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_market_report_details_created
                 ON market_report_details(created_at DESC);
+            CREATE TABLE IF NOT EXISTS market_report_evidence (
+                evidence_sha256 TEXT PRIMARY KEY,
+                report_id TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                report_sha256 TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (report_id) REFERENCES market_report_details(report_id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_report_evidence_report
+                ON market_report_evidence(report_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS report_deliveries (
                 report_kind TEXT NOT NULL CHECK (report_kind IN ('daily', 'weekly')),
                 report_date TEXT NOT NULL,
@@ -387,52 +403,110 @@ class MemoryStore:
             ).fetchall()
             return [(int(row["user_id"]), int(row["chat_id"])) for row in rows]
 
-    async def save_market_report(self, report_date: str, report_text: str) -> None:
-        """Store one generated daily report without any portfolio information."""
+    async def save_market_report(
+        self, report_date: str, report_text: str, *,
+        vix_evidence: Mapping[str, object] | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
+        """Atomically store a report and optional bounded, report-bound evidence.
+
+        Legacy callers remain valid and do not manufacture evidence for old
+        reports. An observation is immutable and may coexist with other
+        observations of identical rendered text.
+        """
         if not report_date or not report_text.strip():
             raise ValueError("report_date and report_text are required")
+        evidence_json = (
+            encode_report_evidence(vix_evidence, report_date, report_text, trigger)
+            if vix_evidence is not None else None
+        )
+        report_sha256 = sha256(report_text.encode("utf-8")).hexdigest()
+        report_id = report_sha256[:32]
         timestamp = _now()
         async with self._lock:
-            self._db().execute(
-                """
-                INSERT INTO market_reports(report_date, report_text, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(report_date) DO UPDATE SET
-                    report_text=excluded.report_text,
-                    updated_at=excluded.updated_at
-                """,
-                (report_date, report_text, timestamp, timestamp),
-            )
-            report_id = sha256(report_text.encode("utf-8")).hexdigest()[:32]
-            self._db().execute(
-                """
-                INSERT OR IGNORE INTO market_report_details(
-                    report_id, report_date, report_text, created_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (report_id, report_date, report_text, timestamp),
-            )
-            # A short rolling window is enough for weekly summaries and avoids
-            # turning this into an unnecessary long-term market archive.
-            self._db().execute(
-                """
-                DELETE FROM market_reports WHERE report_date NOT IN (
-                    SELECT report_date FROM market_reports
-                    ORDER BY report_date DESC LIMIT 40
+            db = self._db()
+            # A failure in any INSERT or retention step rolls back every write,
+            # including an update of the current daily report.
+            with db:
+                db.execute(
+                    """
+                    INSERT INTO market_reports(report_date, report_text, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(report_date) DO UPDATE SET
+                        report_text=excluded.report_text,
+                        updated_at=excluded.updated_at
+                    """,
+                    (report_date, report_text, timestamp, timestamp),
                 )
-                """
-            )
-            # Keep immutable button targets for recent reports. The canonical
-            # daily row above can still be updated for weekly summaries.
-            self._db().execute(
-                """
-                DELETE FROM market_report_details WHERE report_id NOT IN (
-                    SELECT report_id FROM market_report_details
-                    ORDER BY created_at DESC, rowid DESC LIMIT 120
+                db.execute(
+                    """
+                    INSERT OR IGNORE INTO market_report_details(
+                        report_id, report_date, report_text, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (report_id, report_date, report_text, timestamp),
                 )
-                """
-            )
-            self._db().commit()
+                if evidence_json is not None:
+                    detail = db.execute(
+                        "SELECT report_date, report_text FROM market_report_details "
+                        "WHERE report_id=?", (report_id,),
+                    ).fetchone()
+                    if detail["report_date"] != report_date or detail["report_text"] != report_text:
+                        raise ValueError("report evidence conflicts with immutable report detail")
+                    db.execute(
+                        """
+                        INSERT OR IGNORE INTO market_report_evidence(
+                            evidence_sha256, report_id, report_date, report_sha256,
+                            trigger, evidence_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (sha256(evidence_json.encode("utf-8")).hexdigest(), report_id,
+                         report_date, report_sha256, trigger, evidence_json, timestamp),
+                    )
+                # Preserve the existing report/detail retention windows. The
+                # evidence FK deletes only observations of retired details.
+                db.execute(
+                    """
+                    DELETE FROM market_reports WHERE report_date NOT IN (
+                        SELECT report_date FROM market_reports
+                        ORDER BY report_date DESC LIMIT 40
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    DELETE FROM market_report_details WHERE report_id NOT IN (
+                        SELECT report_id FROM market_report_details
+                        ORDER BY created_at DESC, rowid DESC LIMIT 120
+                    )
+                    """
+                )
+                db.execute(
+                    """
+                    DELETE FROM market_report_evidence WHERE evidence_sha256 NOT IN (
+                        SELECT evidence_sha256 FROM market_report_evidence
+                        ORDER BY created_at DESC, rowid DESC LIMIT 360
+                    )
+                    """
+                )
+
+    async def market_report_evidence(self, report_id: str) -> list[dict[str, object]]:
+        """Return only report-bound market evidence, never report/chat text."""
+        if not _valid_report_id(report_id):
+            return []
+        async with self._lock:
+            rows = self._db().execute(
+                "SELECT evidence_sha256, report_id, report_date, report_sha256, "
+                "trigger, evidence_json, created_at FROM market_report_evidence "
+                "WHERE report_id=? ORDER BY created_at DESC, rowid DESC LIMIT 360",
+                (report_id,),
+            ).fetchall()
+            result: list[dict[str, object]] = []
+            for row in rows:
+                item = dict(row)
+                item["evidence"] = json.loads(item.pop("evidence_json"))
+                result.append(item)
+            return result
 
     async def market_reports_between(
         self, start_date: str, end_date: str

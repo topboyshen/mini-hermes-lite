@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import groupby
 import re
-from typing import Sequence
+from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from mini_hermes.overseas_market import (
@@ -14,6 +14,7 @@ from mini_hermes.overseas_market import (
     RegionalIndexQuote,
 )
 from mini_hermes.us_market import UsIndexQuote
+from mini_hermes.vix_evidence import build_report_evidence
 
 
 A_SHARE_TERMS = (
@@ -66,6 +67,7 @@ class GlobalReportBundle:
     report_date: str
     brief: str
     full: str
+    vix_evidence: Mapping[str, object] | None = None
 
 
 _EXPECTED_US_CODES = frozenset({"int_dji", "int_nasdaq", "int_sp500"})
@@ -642,6 +644,7 @@ def sanitize_snapshot(
             treasury=curve,
             regional_indices=snapshot.regional_indices,
             market_context=snapshot.market_context,
+            vix_observation_json=snapshot.vix_observation_json,
         ),
         tuple(issues),
     )
@@ -1457,8 +1460,9 @@ def render_key_numbers(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> s
 
     vix = assets.get("VIX")
     if vix is not None:
-        change = f" · {_asset_percent(vix)}" if vix.percent is not None else ""
-        lines.append(f"波动｜VIX {_format_market_number(vix.price)}{change}")
+        lines.append(
+            f"波动｜VIX {_format_market_number(vix.price)} · {_asset_percent(vix)}"
+        )
 
     compact_assets: list[str] = []
     for code, label, price_prefix in (
@@ -1702,7 +1706,13 @@ def compose_global_report_bundle(
         f"{data_notes}\n\n"
         "价格关系用于辅助判断，不构成投资建议。"
     )
-    return GlobalReportBundle(report_date=report_date, brief=brief, full=full)
+    evidence = build_report_evidence(
+        report_date=report_date, full=full, brief=brief, generated_at=generated_at,
+        expected_trade_date=expected_trade_day.isoformat(),
+        observation=raw_snapshot.vix_observation_json,
+        rendered_quote=next((quote for quote in snapshot.assets if quote.code == "VIX"), None),
+    )
+    return GlobalReportBundle(report_date=report_date, brief=brief, full=full, vix_evidence=evidence)
 
 
 def compose_global_report(
