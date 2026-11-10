@@ -18,6 +18,8 @@ from mini_hermes.reporting import (
     compose_weekly_report,
     expected_us_trade_date,
     infer_report_stance,
+    render_plain_language_summary,
+    render_risk_level,
 )
 from mini_hermes.us_market import UsIndexQuote
 
@@ -135,6 +137,60 @@ FULL_SNAPSHOT = OverseasMarketSnapshot(
         RegionalIndexQuote("int_ftse", "伦敦指数", Decimal("9284.83"), Decimal("70.85"), Decimal("0.77")),
     ),
 )
+
+
+class VixWordingTests(unittest.TestCase):
+    """A falling VIX is reported neutrally instead of implying a rise."""
+
+    @staticmethod
+    def _snapshot(price: str, percent: str | None) -> OverseasMarketSnapshot:
+        quote = CrossAssetQuote(
+            code="VIX",
+            name="Cboe波动率指数",
+            price=Decimal(price),
+            change=Decimal("0"),
+            percent=None if percent is None else Decimal(percent),
+            high=Decimal(price),
+            low=Decimal(price),
+            as_of="2026-08-05T16:15:01",
+            unit="index",
+            source="Cboe",
+        )
+        return OverseasMarketSnapshot(
+            us_indices=FRESH_QUOTES,
+            assets=(quote,),
+            treasury=None,
+        )
+
+    def test_falling_vix_uses_neutral_wording(self) -> None:
+        snapshot = self._snapshot("25.00", "-8.00")
+        stats = analyze_indices(FRESH_QUOTES)
+        risk = render_risk_level(stats, snapshot)
+        summary = render_plain_language_summary(stats, snapshot)
+        self.assertIn("VIX报 25", risk)
+        self.assertNotIn("VIX升至", risk)
+        self.assertIn("VIX报 25", summary)
+        self.assertNotIn("VIX升至", summary)
+
+    def test_rising_vix_keeps_rise_wording(self) -> None:
+        snapshot = self._snapshot("25.00", "8.00")
+        stats = analyze_indices(FRESH_QUOTES)
+        self.assertIn("VIX升至 25", render_risk_level(stats, snapshot))
+        self.assertIn("VIX升至 25", render_plain_language_summary(stats, snapshot))
+
+    def test_unknown_percent_keeps_rise_wording(self) -> None:
+        snapshot = self._snapshot("25.00", None)
+        stats = analyze_indices(FRESH_QUOTES)
+        self.assertIn("VIX升至 25", render_risk_level(stats, snapshot))
+
+    def test_risk_thresholds_are_unchanged(self) -> None:
+        below = self._snapshot("19.99", "-3.00")
+        critical = self._snapshot("31.00", "-5.00")
+        stats = analyze_indices(FRESH_QUOTES)
+        self.assertNotIn("VIX", render_risk_level(stats, below))
+        banner = render_risk_level(stats, critical)
+        self.assertIn("🔴 重要风险", banner)
+        self.assertIn("VIX报 31", banner)
 
 
 class ReportingTests(unittest.TestCase):

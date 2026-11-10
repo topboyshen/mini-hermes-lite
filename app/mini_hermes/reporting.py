@@ -1183,6 +1183,13 @@ def _dollar_pressure(snapshot: OverseasMarketSnapshot) -> bool:
     )
 
 
+def _vix_move_label(vix: CrossAssetQuote | None) -> str:
+    """Use neutral wording when VIX is below the previous close."""
+    if vix is not None and vix.percent is not None and vix.percent < 0:
+        return "VIX报"
+    return "VIX升至"
+
+
 def render_risk_level(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> str:
     """Return a low-noise severity banner; only exceptional moves turn red."""
     assets = _asset_map(snapshot)
@@ -1190,10 +1197,11 @@ def render_risk_level(stats: IndexStats, snapshot: OverseasMarketSnapshot) -> st
     critical: list[str] = []
     watch: list[str] = []
     if vix is not None:
+        vix_label = _vix_move_label(vix)
         if vix.price >= Decimal("30"):
-            critical.append(f"VIX报 {_format_market_number(vix.price)}")
+            critical.append(f"{vix_label} {_format_market_number(vix.price)}")
         elif vix.price >= Decimal("20"):
-            watch.append(f"VIX报 {_format_market_number(vix.price)}")
+            watch.append(f"{vix_label} {_format_market_number(vix.price)}")
     if stats.complete and stats.average_percent is not None:
         if stats.average_percent <= Decimal("-2"):
             critical.append(f"三大指数均值 {_format_decimal(stats.average_percent, signed=True)}%")
@@ -1271,7 +1279,8 @@ def render_plain_language_summary(
             )
         elif vix is not None:
             sentences.append(
-                f"{tone}，VIX报 {_format_market_number(vix.price)}，风险偏好需要谨慎。"
+                f"{tone}，{_vix_move_label(vix)} {_format_market_number(vix.price)}，"
+                "风险偏好需要谨慎。"
             )
         else:
             sentences.append(f"{tone}。")
