@@ -1,6 +1,8 @@
 from datetime import datetime
 from hashlib import sha256
 from types import SimpleNamespace
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -214,7 +216,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.message_ids, (56,))
 
-    async def test_daily_report_generates_once_for_multiple_subscribers(self) -> None:
+    async def test_daily_report_generates_once_and_writes_file_without_sending(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot.agent = object()
         bot.settings = SimpleNamespace(
@@ -228,60 +230,26 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         bundle = GlobalReportBundle("2026-08-08", "brief report", "overseas report")
         bot._generate_global_report_bundle = AsyncMock(return_value=bundle)
-        send_message = AsyncMock(
-            side_effect=[
-                SimpleNamespace(message_id=123),
-                SimpleNamespace(message_id=124),
-            ]
-        )
+        send_message = AsyncMock()
+        bot._deliver_report = AsyncMock()
         context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+        temporary = tempfile.TemporaryDirectory(prefix="mh-briefing-")
+        self.addCleanup(temporary.cleanup)
+        bot.briefing_output_dir = Path(temporary.name)
 
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 8, 8, 30)
+            clock.now.return_value = datetime(2026, 8, 8, 8, 20)
             await bot.daily_report_job(context)
 
         bot._generate_global_report_bundle.assert_awaited_once_with()
         bot.memory.save_market_report.assert_awaited_once_with(
             "2026-08-08", "overseas report", vix_evidence=None, trigger="scheduled"
         )
-        self.assertEqual(send_message.await_count, 2)
-        send_message.assert_any_await(
-            chat_id=99,
-            text="brief report",
-            reply_markup=bot._full_report_markup(bundle),
-        )
-        send_message.assert_any_await(
-            chat_id=100,
-            text="brief report",
-            reply_markup=bot._full_report_markup(bundle),
-        )
-
-    async def test_one_delivery_failure_does_not_block_other_subscribers(self) -> None:
-        bot = object.__new__(MiniHermesBot)
-        bot.agent = object()
-        bot.settings = SimpleNamespace(
-            timezone="Asia/Shanghai", allowed_user_ids=frozenset({42, 43})
-        )
-        bot.memory = SimpleNamespace(
-            subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)]),
-            save_market_report=AsyncMock(),
-        )
-        bot._generate_global_report_bundle = AsyncMock(
-            return_value=GlobalReportBundle(
-                "2026-08-04", "brief report", "overseas report"
-            )
-        )
-        bot._deliver_report = AsyncMock(
-            side_effect=[RuntimeError("Telegram unavailable"), [124]]
-        )
-        context = SimpleNamespace(bot=object())
-
-        with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 4, 8, 30)
-            await bot.daily_report_job(context)
-
-        bot._generate_global_report_bundle.assert_awaited_once_with()
-        self.assertEqual(bot._deliver_report.await_count, 2)
+        send_message.assert_not_awaited()
+        bot._deliver_report.assert_not_awaited()
+        bot.memory.subscriptions.assert_not_awaited()
+        written = Path(temporary.name) / "daily-2026-08-08.md"
+        self.assertEqual(written.read_text(encoding="utf-8"), "brief report\n")
 
     async def test_full_report_callback_reads_persisted_exact_report(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -381,7 +349,7 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("发送失败", message.reply_text.await_args.args[0])
 
-    async def test_weekly_report_runs_only_on_saturday_and_generates_once(self) -> None:
+    async def test_weekly_report_runs_only_on_saturday_and_writes_file_without_sending(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot.settings = SimpleNamespace(
             timezone="Asia/Shanghai", allowed_user_ids=frozenset({42, 43})
@@ -390,43 +358,62 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             subscriptions=AsyncMock(return_value=[(42, 99), (43, 100)])
         )
         bot._generate_weekly_report = AsyncMock(return_value="weekly report")
-        bot._deliver_report = AsyncMock(side_effect=[[201], [202]])
+        bot._deliver_report = AsyncMock()
         context = SimpleNamespace(bot=object())
+        temporary = tempfile.TemporaryDirectory(prefix="mh-weekly-")
+        self.addCleanup(temporary.cleanup)
+        bot.briefing_output_dir = Path(temporary.name)
 
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 8, 9, 0)
+            clock.now.return_value = datetime(2026, 8, 8, 8, 22)
             await bot.weekly_report_job(context)
 
         bot._generate_weekly_report.assert_awaited_once_with()
-        self.assertEqual(bot._deliver_report.await_count, 2)
+        bot._deliver_report.assert_not_awaited()
+        bot.memory.subscriptions.assert_not_awaited()
+        self.assertEqual(
+            (Path(temporary.name) / "weekly-2026-08-08.md").read_text(encoding="utf-8"),
+            "weekly report\n",
+        )
 
-        bot.memory.subscriptions.reset_mock()
         bot._generate_weekly_report.reset_mock()
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 9, 9, 0)
+            clock.now.return_value = datetime(2026, 8, 9, 8, 22)
             await bot.weekly_report_job(context)
 
-        bot.memory.subscriptions.assert_not_awaited()
         bot._generate_weekly_report.assert_not_awaited()
+        self.assertFalse((Path(temporary.name) / "weekly-2026-08-09.md").exists())
 
-    async def test_daily_report_skips_generation_without_allowed_recipients(self) -> None:
+    async def test_daily_report_generates_without_subscribers(self) -> None:
         bot = object.__new__(MiniHermesBot)
         bot.agent = object()
         bot.settings = SimpleNamespace(
             timezone="Asia/Shanghai", allowed_user_ids=frozenset({42})
         )
         bot.memory = SimpleNamespace(
-            subscriptions=AsyncMock(return_value=[(99, 100)])
+            subscriptions=AsyncMock(return_value=[(99, 100)]),
+            save_market_report=AsyncMock(),
         )
-        bot._generate_global_report_bundle = AsyncMock()
+        bot._generate_global_report_bundle = AsyncMock(
+            return_value=GlobalReportBundle("2026-08-04", "brief report", "full report")
+        )
+        bot._deliver_report = AsyncMock()
         context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        temporary = tempfile.TemporaryDirectory(prefix="mh-nosub-")
+        self.addCleanup(temporary.cleanup)
+        bot.briefing_output_dir = Path(temporary.name)
 
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 4, 8, 30)
+            clock.now.return_value = datetime(2026, 8, 4, 8, 20)
             await bot.daily_report_job(context)
 
-        bot._generate_global_report_bundle.assert_not_awaited()
+        bot._generate_global_report_bundle.assert_awaited_once_with()
         context.bot.send_message.assert_not_awaited()
+        bot._deliver_report.assert_not_awaited()
+        self.assertEqual(
+            (Path(temporary.name) / "daily-2026-08-04.md").read_text(encoding="utf-8"),
+            "brief report\n",
+        )
 
     async def test_daily_report_skips_days_without_recent_us_close(self) -> None:
         bot = object.__new__(MiniHermesBot)
@@ -435,21 +422,36 @@ class GatewayRoutingTests(unittest.IsolatedAsyncioTestCase):
             timezone="Asia/Shanghai", allowed_user_ids=frozenset({42})
         )
         bot.memory = SimpleNamespace(subscriptions=AsyncMock())
+        bot._generate_global_report_bundle = AsyncMock()
         context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        temporary = tempfile.TemporaryDirectory(prefix="mh-skip-")
+        self.addCleanup(temporary.cleanup)
+        bot.briefing_output_dir = Path(temporary.name)
 
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 2, 8, 30)
+            clock.now.return_value = datetime(2026, 8, 2, 8, 20)
             await bot.daily_report_job(context)
 
         bot.memory.subscriptions.assert_not_awaited()
+        bot._generate_global_report_bundle.assert_not_awaited()
         context.bot.send_message.assert_not_awaited()
+        self.assertEqual(
+            (Path(temporary.name) / "daily-2026-08-02.md").read_text(encoding="utf-8"),
+            "今日无新美股收盘\n",
+        )
+        self.assertIn("no_recent_us_close", (Path(temporary.name) / "daily-2026-08-02.skip").read_text(encoding="utf-8"))
 
         with patch("mini_hermes.gateway.telegram.jobs.datetime") as clock:
-            clock.now.return_value = datetime(2026, 8, 3, 8, 30)
+            clock.now.return_value = datetime(2026, 8, 3, 8, 20)
             await bot.daily_report_job(context)
 
         bot.memory.subscriptions.assert_not_awaited()
+        bot._generate_global_report_bundle.assert_not_awaited()
         context.bot.send_message.assert_not_awaited()
+        self.assertEqual(
+            (Path(temporary.name) / "daily-2026-08-03.md").read_text(encoding="utf-8"),
+            "今日无新美股收盘\n",
+        )
 
 
 if __name__ == "__main__":

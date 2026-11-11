@@ -201,11 +201,11 @@ class MiniHermesBot(DeliveryMixin, CommandsMixin, JobsMixin, MediaMixin):
         )
         application.job_queue.run_daily(
             self.weekly_report_job,
-            time=parse_daily_time("09:00", self.settings.timezone),
+            time=parse_daily_time("08:22", self.settings.timezone),
             name="weekly-report",
         )
         LOGGER.info(
-            "telegram_started daily_report=%s weekly_report=saturday-09:00",
+            "telegram_started daily_report=%s weekly_report=saturday-08:22 generate_only",
             self.settings.daily_report_time,
         )
 

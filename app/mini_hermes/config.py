@@ -72,7 +72,7 @@ class Settings:
             allowed_user_ids=_int_set(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")),
             model=os.getenv("MODEL", "openai:gpt-5-mini").strip(),
             timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai").strip(),
-            daily_report_time=os.getenv("DAILY_REPORT_TIME", "08:30").strip(),
+            daily_report_time=os.getenv("DAILY_REPORT_TIME", "08:20").strip(),
             agent_timeout_seconds=int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")),
             max_history_messages=int(os.getenv("MAX_HISTORY_MESSAGES", "8")),
             max_concurrent_agent_runs=int(os.getenv("MAX_CONCURRENT_AGENT_RUNS", "2")),

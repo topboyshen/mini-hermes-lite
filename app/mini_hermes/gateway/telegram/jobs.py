@@ -1,132 +1,104 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from telegram.ext import ContextTypes
 
-from mini_hermes.gateway.telegram.delivery import ReportDeliveryError
-
 LOGGER = logging.getLogger(__name__)
+
+DEFAULT_BRIEFING_DIR = Path("/opt/mini-hermes/data/briefing")
+OVERSEAS_SKIP = "今日无新美股收盘"
+
+
+def write_briefing_artifact(directory: Path, name: str, text: str) -> Path:
+    """Atomically write a generate-only briefing file for Signal Gate to stage."""
+    if Path(name).name != name or "/" in name:
+        raise ValueError("invalid briefing artifact name")
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            if not text.endswith("\n"):
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        path = directory / name
+        os.replace(temporary, path)
+        os.chmod(path, 0o640)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return path
 
 
 class JobsMixin:
-    """Scheduled daily / weekly report jobs."""
+    """Scheduled daily / weekly report generation (delivery is owned by Signal Gate)."""
+
+    def _briefing_dir(self) -> Path:
+        override = getattr(self, "briefing_output_dir", None)
+        if override:
+            return Path(override)
+        raw = os.environ.get("BRIEFING_OUTPUT_DIR", "").strip()
+        return Path(raw) if raw else DEFAULT_BRIEFING_DIR
+
+    def _write_briefing(self, kind: str, day: str, text: str, suffix: str = ".md") -> Path | None:
+        name = f"{kind}-{day}{suffix}"
+        try:
+            path = write_briefing_artifact(self._briefing_dir(), name, text)
+        except Exception:  # noqa: BLE001 - generation must not crash the scheduler
+            LOGGER.exception("briefing_file_write_failed kind=%s date=%s", kind, day)
+            return None
+        LOGGER.info(
+            "briefing_file_written kind=%s date=%s chars=%s delivery=deferred",
+            kind,
+            day,
+            len(text),
+        )
+        return path
 
     async def daily_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = datetime.now(ZoneInfo(self.settings.timezone))
-        # At 08:30 Asia/Shanghai, US Monday-Friday closes arrive Tuesday-Saturday.
+        day = now.date().isoformat()
+        # At 08:20 Asia/Shanghai, US Monday-Friday closes arrive Tuesday-Saturday.
         if now.weekday() in {0, 6}:
-            LOGGER.info("daily_report_skipped reason=no_recent_us_close date=%s", now.date())
-            return
-        subscriptions = await self.memory.subscriptions()
-        if not subscriptions:
-            LOGGER.info("daily_report_skipped reason=no_subscribers date=%s", now.date())
+            LOGGER.info("daily_report_skipped reason=no_recent_us_close date=%s", day)
+            self._write_briefing("daily", day, f"status=skipped\nreason=no_recent_us_close\ndate={day}\n", suffix=".skip")
+            self._write_briefing("daily", day, OVERSEAS_SKIP)
             return
 
-        recipients: list[tuple[int, int]] = []
-        for user_id, chat_id in subscriptions:
-            if user_id not in self.settings.allowed_user_ids:
-                LOGGER.warning(
-                    "daily_report_skipped reason=user_not_allowed user_id=%s chat_id=%s",
-                    user_id,
-                    chat_id,
-                )
-                continue
-            recipients.append((user_id, chat_id))
-        if not recipients:
-            LOGGER.info("daily_report_skipped reason=no_allowed_recipients date=%s", now.date())
-            return
-
-        LOGGER.info(
-            "report_generation_started trigger=scheduled date=%s recipients=%s",
-            now.date(),
-            len(recipients),
-        )
+        LOGGER.info("report_generation_started trigger=scheduled date=%s delivery=deferred", day)
         try:
             bundle = await self._generate_global_report_bundle()
         except Exception:  # noqa: BLE001 - one failed run must not stop the scheduler
-            LOGGER.exception("report_generation_failed trigger=scheduled date=%s", now.date())
+            LOGGER.exception("report_generation_failed trigger=scheduled date=%s", day)
             return
         try:
             await self.memory.save_market_report(
                 bundle.report_date, bundle.full, vix_evidence=bundle.vix_evidence,
                 trigger="scheduled",
             )
-            report_saved = True
-        except Exception:  # noqa: BLE001 - history failure must not block delivery
-            LOGGER.exception("report_history_save_failed date=%s", now.date())
-            report_saved = False
-
-        for user_id, chat_id in recipients:
-            try:
-                message_ids = await self._deliver_report(
-                    context.bot,
-                    chat_id,
-                    bundle.brief,
-                    reply_markup=self._full_report_markup(bundle) if report_saved else None,
-                    delivery_key=("daily", now.date().isoformat()),
-                )
-                LOGGER.info(
-                    "report_delivery_succeeded trigger=scheduled user_id=%s chat_id=%s "
-                    "message_ids=%s chars=%s",
-                    user_id,
-                    chat_id,
-                    message_ids,
-                    len(bundle.brief),
-                )
-            except ReportDeliveryError as exc:
-                LOGGER.exception(
-                    "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s "
-                    "partial_message_ids=%s outcome=%s retry=no",
-                    user_id,
-                    chat_id,
-                    exc.message_ids,
-                    exc.outcome,
-                )
-            except Exception:  # noqa: BLE001 - one subscriber must not block others
-                LOGGER.exception(
-                    "report_delivery_failed trigger=scheduled user_id=%s chat_id=%s",
-                    user_id,
-                    chat_id,
-                )
+        except Exception:  # noqa: BLE001 - history failure must not block file output
+            LOGGER.exception("report_history_save_failed date=%s", day)
+        self._write_briefing("daily", day, bundle.brief)
 
     async def weekly_report_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = datetime.now(ZoneInfo(self.settings.timezone))
         if now.weekday() != 5:
             return
-        subscriptions = await self.memory.subscriptions()
-        recipients = [
-            (user_id, chat_id)
-            for user_id, chat_id in subscriptions
-            if user_id in self.settings.allowed_user_ids
-        ]
-        if not recipients:
-            LOGGER.info("weekly_report_skipped reason=no_allowed_recipients date=%s", now.date())
-            return
+        day = now.date().isoformat()
+        LOGGER.info("weekly_report_generation_started date=%s delivery=deferred", day)
         try:
             report = await self._generate_weekly_report()
         except Exception:  # noqa: BLE001 - scheduler must stay alive
-            LOGGER.exception("weekly_report_generation_failed date=%s", now.date())
+            LOGGER.exception("weekly_report_generation_failed date=%s", day)
             return
-        for user_id, chat_id in recipients:
-            try:
-                message_ids = await self._deliver_report(
-                    context.bot, chat_id, report,
-                    delivery_key=("weekly", now.date().isoformat()),
-                )
-                LOGGER.info(
-                    "weekly_report_delivery_succeeded user_id=%s chat_id=%s "
-                    "message_ids=%s chars=%s",
-                    user_id,
-                    chat_id,
-                    message_ids,
-                    len(report),
-                )
-            except Exception:  # noqa: BLE001 - one subscriber must not block others
-                LOGGER.exception(
-                    "weekly_report_delivery_failed user_id=%s chat_id=%s",
-                    user_id,
-                    chat_id,
-                )
+        self._write_briefing("weekly", day, report)
